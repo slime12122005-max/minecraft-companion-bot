@@ -221,3 +221,64 @@ test('Builder loads JSON blueprints, computes material shortage + supply plan, a
     await fsMod.rm(dir, { recursive: true, force: true })
   }
 })
+
+test('Builder._moveWithinReach retries escaping when standing inside target and honors isInterrupted grace window', async () => {
+  const { Vec3 } = await import('vec3')
+
+  // 1) Standing inside target: first goto leaves bot inside, second moves bot out within 4.2 blocks
+  let insideCalls = 0
+  const botEscape = {
+    entity: { position: new Vec3(5, 64, 5) },
+    pathfinder: {
+      goto: async () => {
+        insideCalls += 1
+        if (insideCalls >= 2) {
+          botEscape.entity.position = new Vec3(6, 64, 5)
+        }
+      },
+    },
+  }
+  const builderEscape = new Builder(botEscape)
+  await builderEscape._moveWithinReach(new Vec3(5, 64, 5))
+  assert.equal(insideCalls, 2)
+
+  // 2) Fails explicitly after 3 attempts if bot stays trapped inside target block
+  let stuckCalls = 0
+  const botStuck = {
+    entity: { position: new Vec3(5, 64, 5) },
+    pathfinder: {
+      goto: async () => {
+        stuckCalls += 1
+      },
+    },
+  }
+  const builderStuck = new Builder(botStuck)
+  await assert.rejects(
+    builderStuck._moveWithinReach(new Vec3(5, 64, 5)),
+    /Cannot move out of target block/
+  )
+  assert.equal(stuckCalls, 3)
+
+  // 3) GoalChanged during post-combat isInterrupted window retries even when isPaused() is false
+  let interruptedCalls = 0
+  const botGrace = {
+    entity: { position: new Vec3(15, 64, 5) },
+    pathfinder: {
+      goto: async () => {
+        interruptedCalls += 1
+        if (interruptedCalls === 1) {
+          const err = new Error('GoalChanged right after combat')
+          err.name = 'GoalChanged'
+          throw err
+        }
+        botGrace.entity.position = new Vec3(6, 64, 5)
+      },
+    },
+  }
+  const builderGrace = new Builder(botGrace, {}, {
+    isPaused: () => false,
+    isInterrupted: () => interruptedCalls === 1,
+  })
+  await builderGrace._moveWithinReach(new Vec3(5, 64, 5))
+  assert.equal(interruptedCalls, 2)
+})

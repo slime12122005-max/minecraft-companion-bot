@@ -3,9 +3,26 @@ const { goals } = pf;
 import { Vec3 } from 'vec3';
 
 const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest', 'barrel']);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 export async function handleBasicCommand(ctx, parsed, { username, reply, parentSignal, say, errorReply }) {
   const { bot, tasks, router, combat, equipment, home, survival, memory, dashboard, state } = ctx;
+
+  async function canOpenNearbyChest() {
+    if (parentSignal) {
+      while ((combat.busy || tasks.paused || survival.busy) && !parentSignal.aborted) {
+        await sleep(200);
+      }
+      if (parentSignal.aborted) throw new Error('Đã hủy');
+    }
+    if (combat.busy) {
+      return { ok: false, error: 'Đang chiến đấu nên tạm chưa mở rương được.' };
+    }
+    if (bot.currentWindow) {
+      return { ok: false, error: 'Đang mở một cửa sổ khác, hãy thử lại sau.' };
+    }
+    return { ok: true };
+  }
 
   switch (parsed.type) {
     case 'help':
@@ -200,6 +217,11 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
         await say('Không thấy rương gần đây (hãy đứng cạnh rương gõ "đây là rương" để lưu).', { kind: 'error' });
         return true;
       }
+      const chestGuard = await canOpenNearbyChest();
+      if (!chestGuard.ok) {
+        await say(chestGuard.error, { kind: 'error' });
+        return true;
+      }
       try {
         if (chest.position) {
           home.setStorageChest(chest.position);
@@ -264,6 +286,11 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
           await memory.flush();
           await say(res.count > 0 ? `Đã lấy ${res.count} ${res.name} từ rương.` : `Trong rương không còn ${parsed.target}.`, { kind: 'final' });
         }, { errPrefix: 'Không lấy được từ rương', onError: errorReply }, parentSignal, reply);
+        return true;
+      }
+      const chestGuard = await canOpenNearbyChest();
+      if (!chestGuard.ok) {
+        await say(chestGuard.error, { kind: 'error' });
         return true;
       }
       try {

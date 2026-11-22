@@ -1358,3 +1358,96 @@ test('session classifyIntent fallback drops stale command when a newer chat mess
     await session.cleanup();
   }
 });
+
+test('session cleanup detaches bot listeners, loop guards equipment/emergencyHeal races, and nearby chest commands guard combat/open window', async () => {
+  const fakeBot = makeFakeBot();
+  const memory = new Memory({ autoSaveMs: 0 });
+  const tasks = new TaskCoordinator({ log: () => {} });
+  let openChestCalls = 0;
+  let maintainCalls = 0;
+  let consumeCalls = 0;
+  const chestBlock = { name: 'chest', position: pos(2, 64, 0) };
+
+  fakeBot.health = 6;
+  fakeBot.inventory.items = () => [
+    { name: 'golden_apple', type: 322, count: 2 },
+    { name: 'cobblestone', type: 4, count: 8 },
+  ];
+  fakeBot.consume = async () => { consumeCalls += 1; };
+  fakeBot.findBlock = ({ matching }) => (matching({ name: 'chest' }) ? chestBlock : null);
+  fakeBot.openChest = async () => {
+    openChestCalls += 1;
+    return {
+      containerItems: () => [{ name: 'iron_ingot', type: 265, count: 4 }],
+      deposit: async () => {},
+      withdraw: async () => {},
+      close: () => {},
+    };
+  };
+
+  const session = createBotSession(DEFAULT_CONFIG, {
+    llm: {},
+    memory,
+    tasks,
+    router: new CommandRouter(),
+    createBotFn: () => fakeBot,
+    loadPlugins: false,
+  });
+
+  session.equipment.maintainArmorAndShield = async () => {
+    maintainCalls += 1;
+  };
+
+  try {
+    fakeBot.emit('spawn');
+
+    // 1) Nearby store / take_from_chest refuse while combat.busy or bot.currentWindow is active
+    session.combat.busy = true;
+    await session.onCommand('cất đồ');
+    await session.onCommand('lấy từ rương 2 sắt');
+    assert.equal(openChestCalls, 0);
+    assert.ok(fakeBot._chats.some(c => c.includes('Đang chiến đấu nên tạm chưa mở rương được')));
+
+    session.combat.busy = false;
+    fakeBot._chats.length = 0;
+    fakeBot.currentWindow = { id: 1 };
+    await session.onCommand('cất đồ');
+    await session.onCommand('lấy từ rương 2 sắt');
+    assert.equal(openChestCalls, 0);
+    assert.ok(fakeBot._chats.some(c => c.includes('Đang mở một cửa sổ khác')));
+    fakeBot.currentWindow = null;
+
+    // 2) Loop skips emergencyHeal and maintainArmorAndShield during bowCharging / combat.busy / hazardBusy
+    session.combat.config.enabled = false;
+    session.combat.busy = true;
+    session.combat.bowCharging = true;
+    session.survival.hazardBusy = true;
+    await new Promise(r => setTimeout(r, 1100));
+    assert.equal(maintainCalls, 0);
+    assert.equal(consumeCalls, 0);
+
+    // Also direct emergencyHeal skips when hazardBusy is true
+    assert.equal(await session.survival.emergencyHeal(), false);
+    assert.equal(consumeCalls, 0);
+
+    // Clear guards -> maintenance runs cleanly
+    session.combat.busy = false;
+    session.combat.bowCharging = false;
+    session.survival.hazardBusy = false;
+    await new Promise(r => setTimeout(r, 1100));
+    assert.ok(maintainCalls >= 1);
+    assert.ok(consumeCalls >= 1);
+
+    // 3) cleanup() detaches all bot event listeners and late chat does not trigger commands
+    await session.cleanup();
+    for (const ev of ['spawn', 'end', 'death', 'entitySleep', 'chat', 'whisper', 'error', 'kicked']) {
+      assert.equal(fakeBot.listenerCount(ev), 0, `expected 0 listeners for ${ev}`);
+    }
+    const chatCountBefore = fakeBot._chats.length;
+    fakeBot.emit('chat', 'araslime', 'trạng thái');
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(fakeBot._chats.length, chatCountBefore);
+  } finally {
+    await session.cleanup();
+  }
+});

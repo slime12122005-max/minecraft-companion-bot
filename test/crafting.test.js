@@ -369,3 +369,62 @@ test('planCraftDependencies resolves multi-tier craft+smelt chain and CraftManag
   assert.equal(furnaceSmelted, true);
   assert.equal(counts.get(257), 1);
 });
+
+test('CraftManager._moveNextTo retries on GoalChanged when interrupted and waits while paused', async () => {
+  let paused = false;
+  let interrupted = false;
+  let gotoCalls = 0;
+  const bot = {
+    entity: { position: new Vec3(0, 64, 0) },
+    registry: {
+      blocksByName: { crafting_table: { id: 58 } },
+      itemsByName: {
+        oak_planks: { id: 5 },
+        stick: { id: 280 },
+        wooden_pickaxe: { id: 270 },
+      },
+    },
+    inventory: {
+      count: (id) => ({ 5: 3, 280: 2 }[id] ?? 0),
+      items: () => [],
+    },
+    findBlock: () => ({ name: 'crafting_table', position: new Vec3(10, 64, 0) }),
+    pathfinder: {
+      goto: async () => {
+        gotoCalls += 1;
+        if (gotoCalls === 1) {
+          paused = true;
+          interrupted = true;
+          setTimeout(() => {
+            paused = false;
+          }, 30);
+          const err = new Error('Goal changed by combat');
+          err.name = 'GoalChanged';
+          throw err;
+        }
+        interrupted = false;
+        bot.entity.position = new Vec3(9, 64, 0);
+      },
+    },
+    recipesAll: (id) => (id === 270 ? [{
+      result: { id: 270, count: 1 },
+      requiresTable: true,
+      delta: [{ id: 5, count: -3 }, { id: 280, count: -2 }, { id: 270, count: 1 }],
+    }] : []),
+    recipesFor: (id) => (id === 270 ? [{
+      result: { id: 270, count: 1 },
+      requiresTable: true,
+      delta: [{ id: 5, count: -3 }, { id: 280, count: -2 }, { id: 270, count: 1 }],
+    }] : []),
+    craft: async () => {},
+  };
+
+  const craft = new CraftManager(bot, {}, {
+    log: () => {},
+    isPaused: () => paused,
+    isInterrupted: () => interrupted,
+  });
+  const res = await craft.craftItem('wooden_pickaxe', 1);
+  assert.equal(res.name, 'wooden_pickaxe');
+  assert.equal(gotoCalls, 2);
+});

@@ -23,11 +23,15 @@ export function bindSessionEvents(ctx) {
     state,
   } = ctx;
 
-  bot.once('spawn', () => {
-    logFor('bot')(`✅ Bot ${bot.username} đã vào thế giới ${bot.version}`);
-  });
+  let disposed = false;
 
-  bot.on('spawn', () => {
+  const onFirstSpawn = () => {
+    if (disposed) return;
+    logFor('bot')(`✅ Bot ${bot.username} đã vào thế giới ${bot.version}`);
+  };
+
+  const onSpawn = () => {
+    if (disposed) return;
     state.connected = true;
     state.disconnected = false;
     ctx.pushInbox?.({
@@ -50,15 +54,17 @@ export function bindSessionEvents(ctx) {
         ctx.replyHuman(msg, { replyFn: (t) => bot.chat(t) }).catch(() => {});
       });
     }
-  });
+  };
 
-  bot.on('end', () => {
+  const onEnd = () => {
+    if (disposed) return;
     state.connected = false;
     state.disconnected = true;
     stateMachine.sync({ connected: false });
-  });
+  };
 
-  bot.on('death', () => {
+  const onDeath = () => {
+    if (disposed) return;
     stateMachine.transition(SESSION_STATES.DEAD, 'Bot đã chết');
     survival.recordDeath(bot.entity, bot.game?.dimension);
     ctx.pushInbox?.({
@@ -73,9 +79,10 @@ export function bindSessionEvents(ctx) {
     });
     memory.flush().catch(() => {});
     ctx.stopCurrentTask('Bot đã chết');
-  });
+  };
 
-  bot.on('entitySleep', (entity) => {
+  const onEntitySleep = (entity) => {
+    if (disposed) return;
     if (!entity || entity.username !== config.owner) return;
     if (combat.busy || bot.isSleeping) return;
     const bed = bot.findBlock({
@@ -91,9 +98,10 @@ export function bindSessionEvents(ctx) {
       await bot.sleep(bed);
     }, { onAbort: () => bot.pathfinder?.setGoal(null) });
     run?.promise?.catch(() => {});
-  });
+  };
 
-  bot.on('chat', (username, message) => {
+  const onChat = (username, message) => {
+    if (disposed) return;
     const inboxEntry = username !== bot.username
       ? ctx.pushInbox?.({
           kind: 'chat',
@@ -104,8 +112,10 @@ export function bindSessionEvents(ctx) {
         })
       : null;
     ctx.handleCommand(username, message, { viaWhisper: false, inboxEntry }).catch(err => errorFor('chat', formatError(err)));
-  });
-  bot.on('whisper', (username, message) => {
+  };
+
+  const onWhisper = (username, message) => {
+    if (disposed) return;
     const inboxEntry = username !== bot.username
       ? ctx.pushInbox?.({
           kind: 'whisper',
@@ -116,13 +126,21 @@ export function bindSessionEvents(ctx) {
         })
       : null;
     ctx.handleCommand(username, message, { viaWhisper: true, inboxEntry }).catch(err => errorFor('whisper', formatError(err)));
-  });
+  };
+
+  bot.once('spawn', onFirstSpawn);
+  bot.on('spawn', onSpawn);
+  bot.on('end', onEnd);
+  bot.on('death', onDeath);
+  bot.on('entitySleep', onEntitySleep);
+  bot.on('chat', onChat);
+  bot.on('whisper', onWhisper);
 
   let combatTicking = false;
   let lastSlowMaintainAt = 0;
 
   const loop = setInterval(async () => {
-    if (!bot.entity || bot.isAlive === false || combatTicking) return;
+    if (disposed || !bot.entity || bot.isAlive === false || combatTicking) return;
     combatTicking = true;
     const now = Date.now();
     try {
@@ -136,7 +154,7 @@ export function bindSessionEvents(ctx) {
 
       if (!state.aiPaused) {
         await survival.handleHazards();
-        if (!combat.shieldActive) {
+        if (!combat.shieldActive && !combat.bowCharging && !survival.busy) {
           survival.emergencyHeal().catch(() => {});
         }
 
@@ -166,7 +184,7 @@ export function bindSessionEvents(ctx) {
         if (!combat.busy && !combat.shieldActive && !survival.busy && !bot.currentWindow && (!bot.targetDigBlock || urgentFood)) {
           survival.autoEat().catch(() => {});
         }
-        if (!survival.busy && !bot.currentWindow) {
+        if (!survival.busy && !combat.busy && !combat.shieldActive && !combat.bowCharging && !bot.currentWindow) {
           await equipment.maintainArmorAndShield();
           if (
             equipment.discardObsolete &&
@@ -199,8 +217,36 @@ export function bindSessionEvents(ctx) {
   }, 250);
   loop.unref?.();
 
+  const onError = err => errorFor('bot', formatError(err));
+  const onKicked = reason => {
+    if (disposed) return;
+    ctx.pushInbox?.({
+      kind: 'kicked',
+      username: bot.username,
+      message: typeof reason === 'string' ? reason : JSON.stringify(reason),
+    });
+    warnFor('bot', 'Bị kick:', reason);
+  };
+
+  bot.on('error', onError);
+  bot.on('kicked', onKicked);
+
   async function cleanup() {
+    disposed = true;
     clearInterval(loop);
+    const detach = (event, fn) => {
+      if (typeof bot.off === 'function') bot.off(event, fn);
+      else if (typeof bot.removeListener === 'function') bot.removeListener(event, fn);
+    };
+    detach('spawn', onFirstSpawn);
+    detach('spawn', onSpawn);
+    detach('end', onEnd);
+    detach('death', onDeath);
+    detach('entitySleep', onEntitySleep);
+    detach('chat', onChat);
+    detach('whisper', onWhisper);
+    detach('error', onError);
+    detach('kicked', onKicked);
     combat.stop();
     ctx.stopCurrentTask('Ngắt kết nối', { clearQueue: true });
     if (!externalDashboard) {
@@ -208,16 +254,6 @@ export function bindSessionEvents(ctx) {
     }
     await memory.flush().catch(() => {});
   }
-
-  bot.on('error', err => errorFor('bot', formatError(err)));
-  bot.on('kicked', reason => {
-    ctx.pushInbox?.({
-      kind: 'kicked',
-      username: bot.username,
-      message: typeof reason === 'string' ? reason : JSON.stringify(reason),
-    });
-    warnFor('bot', 'Bị kick:', reason);
-  });
 
   return { loop, cleanup };
 }

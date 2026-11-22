@@ -16,10 +16,12 @@ const INVALID_SUPPORT_NAMES = new Set(['air', 'water', 'lava', 'short_grass', 't
 const SLEEP = ms => new Promise(r => setTimeout(r, ms));
 
 export class CraftManager {
-  constructor(bot, config = {}, { log = () => {} } = {}) {
+  constructor(bot, config = {}, { log = () => {}, isPaused = null, isInterrupted = null } = {}) {
     this.bot = bot;
     this.config = config;
     this.log = log;
+    this.isPaused = isPaused;
+    this.isInterrupted = isInterrupted ?? (() => Boolean(this.isPaused?.()));
   }
 
   _countItem(itemId) {
@@ -31,10 +33,26 @@ export class CraftManager {
       .reduce((sum, i) => sum + (i.count ?? 0), 0);
   }
 
-  async _moveNextTo(block) {
+  async _moveNextTo(block, signal = null) {
     if (!this.bot.pathfinder?.goto || !this.bot.entity?.position || !block?.position) return;
-    if (this.bot.entity.position.distanceTo(block.position) <= 4) return;
-    await this.bot.pathfinder.goto(new goals.GoalGetToBlock(block.position.x, block.position.y, block.position.z));
+    while (!signal?.aborted) {
+      while (this.isPaused?.() && !signal?.aborted) {
+        await SLEEP(200);
+      }
+      if (signal?.aborted) throw new Error('Đã hủy');
+      if (this.bot.entity.position.distanceTo(block.position) <= 4) return;
+      try {
+        await this.bot.pathfinder.goto(new goals.GoalGetToBlock(block.position.x, block.position.y, block.position.z));
+        return;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        if ((err?.name === 'GoalChanged' || err?.name === 'PathStopped') && this.isInterrupted?.()) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (signal?.aborted) throw new Error('Đã hủy');
   }
 
   async _placeUtilityBlock(itemName) {
@@ -70,7 +88,7 @@ export class CraftManager {
     if (tableDef && typeof this.bot.findBlock === 'function') {
       const existing = this.bot.findBlock({ matching: tableDef.id, maxDistance: 16 });
       if (existing) {
-        await this._moveNextTo(existing);
+        await this._moveNextTo(existing, signal);
         return existing;
       }
     }
@@ -222,7 +240,7 @@ export class CraftManager {
     if (furnaceIds.length > 0 && typeof this.bot.findBlock === 'function') {
       const existing = this.bot.findBlock({ matching: furnaceIds, maxDistance: 16 });
       if (existing) {
-        await this._moveNextTo(existing);
+        await this._moveNextTo(existing, signal);
         return existing;
       }
     }

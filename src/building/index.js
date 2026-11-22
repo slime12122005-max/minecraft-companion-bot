@@ -17,13 +17,14 @@ import { buildBlueprint, findSupport } from './scaffold_placer.js';
 export { SCHEMATIC_CATALOG, downloadSchematic, rotatePosition, calculateMaterialShortage, buildSupplyPlan };
 
 export class Builder {
-  constructor(bot, config = {}, { log = () => {}, equipment = null, memory = null, isPaused = null } = {}) {
+  constructor(bot, config = {}, { log = () => {}, equipment = null, memory = null, isPaused = null, isInterrupted = null } = {}) {
     this.bot = bot;
     this.config = config.building ?? {};
     this.log = typeof log === 'function' ? log : () => {};
     this.equipment = equipment;
     this.memory = memory;
     this.isPaused = isPaused;
+    this.isInterrupted = isInterrupted ?? (() => Boolean(this.isPaused?.()));
     this.schematic = null;
     this.loadedFile = null;
     this.blueprint = null;
@@ -84,6 +85,7 @@ export class Builder {
 
   async _moveWithinReach(target, signal) {
     if (!this.bot.pathfinder?.goto || !this.bot.entity?.position) return;
+    let escapeAttempts = 0;
     while (true) {
       checkAbort(signal);
       await this._waitIfPaused(signal);
@@ -99,10 +101,17 @@ export class Builder {
         await this.bot.pathfinder.goto(goal);
         const stillInside = this._isStandingInside(target);
         const nowDist = this.bot.entity.position.distanceTo(target);
-        if (!inside || stillInside || nowDist <= 4.2) return;
+        if (!inside) return;
+        if (!stillInside && nowDist <= 4.2) return;
+        if (stillInside) {
+          escapeAttempts += 1;
+          if (escapeAttempts >= 3) {
+            throw new Error(`Cannot move out of target block at ${target.x},${target.y},${target.z}`);
+          }
+        }
       } catch (err) {
         checkAbort(signal);
-        if ((err.name === 'GoalChanged' || err.name === 'PathStopped') && this.isPaused?.()) {
+        if ((err?.name === 'GoalChanged' || err?.name === 'PathStopped') && this.isInterrupted?.()) {
           continue;
         }
         throw err;

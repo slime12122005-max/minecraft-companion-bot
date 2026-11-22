@@ -53,10 +53,14 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
   const watchdog = new HealthWatchdog();
   const equipment = new EquipmentManager(bot, config, { log: logFor('equipment') });
   const home = new HomeManager(bot, config, { memory, log: logFor('home') });
-  const crafting = new CraftManager(bot, config, { log: logFor('craft') });
-  const survival = new SurvivalManager(bot, config, { memory, home, crafting, log: logFor('survival') });
   const isWorkPaused = () => Boolean(combat.busy || tasks.paused || survival.busy);
   const isWorkInterrupted = () => Boolean(combat.busy || tasks.paused || survival.busy || (Date.now() - state.lastCombatEndedAt < 500));
+  const crafting = new CraftManager(bot, config, {
+    log: logFor('craft'),
+    isPaused: isWorkPaused,
+    isInterrupted: isWorkInterrupted,
+  });
+  const survival = new SurvivalManager(bot, config, { memory, home, crafting, log: logFor('survival') });
   const mining = new MiningFarmingManager(bot, config, {
     log: logFor('work'),
     ensurePickaxe: (tier, sig) => survival.ensurePickaxe(tier, sig),
@@ -134,6 +138,7 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     equipment,
     memory,
     isPaused: isWorkPaused,
+    isInterrupted: isWorkInterrupted,
   });
 
   combat.start();

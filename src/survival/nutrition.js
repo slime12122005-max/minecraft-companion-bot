@@ -11,7 +11,7 @@ export function bestFood(bot) {
 
 export async function emergencyHeal(ctx) {
   const now = Date.now();
-  if (ctx.eating || now - ctx.lastHealAt < 3000) return false;
+  if (ctx.eating || ctx.hazardBusy || now - ctx.lastHealAt < 3000) return false;
   if (typeof ctx.bot.equip !== 'function' || typeof ctx.bot.consume !== 'function') return false;
 
   const health = ctx.bot.health ?? 20;
@@ -51,7 +51,7 @@ export async function emergencyHeal(ctx) {
 
 export async function autoEat(ctx, { force = false } = {}) {
   const now = Date.now();
-  if (ctx.bot.isSleeping || ctx.eating || (!force && now - ctx.lastEatAt < 3500)) return false;
+  if (ctx.bot.isSleeping || ctx.eating || ctx.hazardBusy || (!force && now - ctx.lastEatAt < 3500)) return false;
   const food = ctx.bot.food ?? 20;
   const health = ctx.bot.health ?? 20;
   if (force ? food >= 20 : (food >= 14 && !(health <= 14 && food < 20))) return false;
