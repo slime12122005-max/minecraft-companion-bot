@@ -16,10 +16,24 @@ import { buildBlueprint, findSupport } from './scaffold_placer.js';
 
 export { SCHEMATIC_CATALOG, downloadSchematic, rotatePosition, calculateMaterialShortage, buildSupplyPlan };
 
+export function intersectsBlockAABB(entityPos, blockPos) {
+  if (!entityPos || !blockPos) return false;
+  const bx = Math.floor(blockPos.x);
+  const by = Math.floor(blockPos.y);
+  const bz = Math.floor(blockPos.z);
+  return (
+    Math.abs(entityPos.x - (bx + 0.5)) < 0.8 &&
+    entityPos.y < by + 1 &&
+    entityPos.y + 1.8 > by &&
+    Math.abs(entityPos.z - (bz + 0.5)) < 0.8
+  );
+}
+
 export class Builder {
   constructor(bot, config = {}, { log = () => {}, equipment = null, memory = null, isPaused = null, isInterrupted = null } = {}) {
     this.bot = bot;
     this.config = config.building ?? {};
+    this.ownerName = config.owner ?? null;
     this.log = typeof log === 'function' ? log : () => {};
     this.equipment = equipment;
     this.memory = memory;
@@ -75,12 +89,13 @@ export class Builder {
   }
 
   _isStandingInside(target) {
-    const pos = this.bot.entity?.position;
-    if (!pos) return false;
-    const bx = Math.floor(pos.x);
-    const by = Math.floor(pos.y);
-    const bz = Math.floor(pos.z);
-    return bx === target.x && bz === target.z && (by === target.y || by + 1 === target.y);
+    return intersectsBlockAABB(this.bot.entity?.position, target);
+  }
+
+  _isOwnerInside(target) {
+    if (!this.ownerName) return false;
+    const ownerPos = this.bot.players?.[this.ownerName]?.entity?.position ?? null;
+    return intersectsBlockAABB(ownerPos, target);
   }
 
   async _moveWithinReach(target, signal) {

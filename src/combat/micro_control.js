@@ -10,6 +10,48 @@ export function isShield(name) { return name === 'shield'; }
 export function isBow(name) { return name === 'bow' || name.endsWith('_bow'); }
 export function isArrow(name) { return name === 'arrow' || name.endsWith('_arrow'); }
 
+export function getAttackCooldownMs(item) {
+  const name = itemName(item);
+  let speed = 4.0;
+  if (name.endsWith('_sword')) speed = 1.6;
+  else if (name === 'wooden_axe' || name === 'stone_axe') speed = 0.8;
+  else if (name === 'iron_axe') speed = 0.9;
+  else if (name.endsWith('_axe')) speed = 1.0;
+  else if (name === 'trident') speed = 1.1;
+  else if (name === 'mace') speed = 0.6;
+  else if (name.endsWith('_pickaxe')) speed = 1.2;
+  else if (name.endsWith('_shovel')) speed = 1.0;
+  return Math.ceil(20 / speed) * 50;
+}
+
+export function isCreeperIgnited(entity) {
+  return Boolean(
+    entity?.ignited === true ||
+    entity?.metadata?.[16] === 1 ||
+    entity?.metadata?.[18] === true
+  );
+}
+
+export function wouldKnockCreeperTowardOwner(botPos, creeperPos, ownerPos) {
+  if (!botPos || !creeperPos || !ownerPos) return false;
+  const ux = creeperPos.x - botPos.x;
+  const uz = creeperPos.z - botPos.z;
+  const vx = ownerPos.x - creeperPos.x;
+  const vz = ownerPos.z - creeperPos.z;
+  if (Math.hypot(vx, vz) >= 6.0) return false;
+  return ux * vx + uz * vz > 0;
+}
+
+export function isFriendlyInCursor(bot, target, owner = null) {
+  if (typeof bot?.entityAtCursor !== 'function') return false;
+  const hit = bot.entityAtCursor(3.5);
+  if (!hit || hit === target || (target?.id != null && hit.id === target.id)) return false;
+  if (owner && (hit === owner || (owner.id != null && hit.id === owner.id) || (owner.username && hit.username === owner.username))) {
+    return true;
+  }
+  return hit.type === 'player';
+}
+
 export async function face(ctx, entity) {
   if (!entity?.position) return;
   try {
@@ -41,11 +83,11 @@ export function lowerShield(ctx) {
   } catch {}
 }
 
-export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1, distance = ctx._currentTargetDist ?? 2 } = {}) {
+export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1, distance = ctx._currentTargetDist ?? 2, owner = null } = {}) {
   if (ctx.isEating?.()) return;
   const now = Date.now();
-  if (now - ctx.lastAttackAt < 600) return;
-  ctx.lastAttackAt = now;
+  const cooldownMs = getAttackCooldownMs(ctx.bot.heldItem);
+  if (now - ctx.lastAttackAt < cooldownMs) return;
   const opponentBlocking = Boolean(
     target?.blocking ||
     (typeof target?.metadata?.[8] === 'number' && (target.metadata[8] & 0x01) !== 0) ||
@@ -57,11 +99,15 @@ export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1
     } else if (ctx.equipment?.equipMelee) {
       await ctx.equipment.equipMelee();
     }
+    if (isFriendlyInCursor(ctx.bot, target, owner)) return;
+    const finalCooldownMs = getAttackCooldownMs(ctx.bot.heldItem);
+    if (now - ctx.lastAttackAt < finalCooldownMs) return;
+    ctx.lastAttackAt = now;
     if (typeof ctx.bot.attack === 'function') await ctx.bot.attack(target);
   } catch {}
 }
 
-export async function jumpCrit(ctx, target) {
+export async function jumpCrit(ctx, target, opts = {}) {
   if (ctx.isEating?.()) return;
   let jumped = false;
   try {
@@ -73,7 +119,7 @@ export async function jumpCrit(ctx, target) {
       jumped = false;
     }
     if (!ctx.running || ctx.isEating?.()) return;
-    await ctx._attack(target);
+    await ctx._attack(target, opts);
   } catch {
   } finally {
     if (jumped && typeof ctx.bot.setControlState === 'function') {
@@ -265,13 +311,42 @@ export async function applyDecision(ctx, decision, threat, owner) {
 
   if (action === 'attack' || action === 'melee' || action === 'bow') {
     if (distance < 4.5) {
+      if (itemName(target).includes('creeper')) {
+        if (isCreeperIgnited(target)) {
+          await ctx._fleeFrom(target);
+          return;
+        }
+        if (
+          owner?.position &&
+          ctx.bot.entity?.position &&
+          wouldKnockCreeperTowardOwner(ctx.bot.entity.position, target.position, owner.position)
+        ) {
+          const dx = target.position.x - ctx.bot.entity.position.x;
+          const dz = target.position.z - ctx.bot.entity.position.z;
+          const len = Math.hypot(dx, dz) || 1;
+          const sideCandidates = [
+            target.position.offset((-dz / len) * 3, 0, (dx / len) * 3),
+            target.position.offset((dz / len) * 3, 0, (-dx / len) * 3),
+          ];
+          const safeSide = sideCandidates.find(
+            cand => !wouldKnockCreeperTowardOwner(cand, target.position, owner.position) && ctx._isSafeEscapeSpot(cand)
+          ) ?? sideCandidates[0];
+          if (ctx.bot.pathfinder && safeSide) {
+            try {
+              ctx._setCombatGoal(new goals.GoalNear(safeSide.x, safeSide.y, safeSide.z, 1));
+            } catch {}
+          }
+          return;
+        }
+      }
       ctx._lowerShield();
       const allowCrit = ctx.config.crit && !ctx.bot.entity?.isInWater;
+      const cooldownMs = getAttackCooldownMs(ctx.bot.heldItem);
       if (allowCrit) {
-        if (ctx._canCrit()) await ctx._attack(target);
-        else if (ctx.bot.entity?.onGround && Date.now() - ctx.lastAttackAt >= 600) await ctx._jumpCrit(target);
+        if (ctx._canCrit()) await ctx._attack(target, { owner });
+        else if (ctx.bot.entity?.onGround && Date.now() - ctx.lastAttackAt >= cooldownMs) await ctx._jumpCrit(target, { owner });
       } else {
-        await ctx._attack(target);
+        await ctx._attack(target, { owner });
       }
     } else if (distance <= ctx.config.radius) {
       const isRangedEnemy = RANGED_MOBS.some(r => itemName(target).includes(r));

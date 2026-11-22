@@ -1,5 +1,7 @@
 import { getDurabilityRatio } from '../equipment.js';
+import { BUILTIN_MACROS } from '../skills/macro_runner.js';
 
+const MCP_LEASE_MS = 90_000;
 const NOTABLE_STATION_BLOCKS = new Set([
   'ancient_debris',
   'crafting_table',
@@ -83,6 +85,8 @@ export function createDashboardBridge(ctx) {
       username: bot.username,
       connected: state.connected,
       aiPaused: Boolean(state.aiPaused),
+      mcpLeaseActive: Date.now() < (state.mcpLeaseUntil || 0),
+      mcpLeaseUntil: state.mcpLeaseUntil || 0,
       state: stateMachine.snapshot().state,
       watchdog: watchdog.status(),
       lan: {
@@ -275,11 +279,26 @@ export function createDashboardBridge(ctx) {
       : 30;
     const messages = (inbox.items ?? [])
       .filter(item => item.id > cleanSince)
-      .slice(-cleanLimit);
+      .slice(-cleanLimit)
+      .map((item) => {
+        if (item.role) return item;
+        const isChat = item.kind === 'chat' || item.kind === 'whisper';
+        const role = isChat
+          ? (item.isOwner ? 'OWNER_TRUSTED' : 'UNTRUSTED_PUBLIC_PLAYER')
+          : 'SYSTEM';
+        return { ...item, role };
+      });
     return {
       latestId: inbox.seq ?? 0,
       messages,
     };
+  }
+
+  function touchMcpLease(ttlMs = MCP_LEASE_MS) {
+    const dur = Math.max(1000, Number(ttlMs) || MCP_LEASE_MS);
+    const next = Date.now() + dur;
+    state.mcpLeaseUntil = Math.max(state.mcpLeaseUntil || 0, next);
+    return state.mcpLeaseUntil;
   }
 
   async function onSay({ message, whisperTo = null } = {}) {
@@ -374,5 +393,30 @@ export function createDashboardBridge(ctx) {
     return { ok: false, message: 'Thao tác không hợp lệ' };
   }
 
-  return { getDashboardState, onCommand, onControl, onInventoryAction, getNearby, getInbox, onSay };
+  async function onMacro({ macro, wait = true } = {}) {
+    const name = String(macro ?? '').trim();
+    if (!BUILTIN_MACROS[name]) {
+      return { ok: false, status: 400, error: `Unknown macro: ${name}` };
+    }
+    if (!ctx.macros?.run) {
+      return { ok: false, status: 503, error: 'Macro runner chưa sẵn sàng' };
+    }
+    ctx.stopCurrentTask?.(`Macro ${name}`);
+    const run = tasks.run(
+      { name: `macro_${name}`, reason: `Macro ${name}` },
+      (signal) => ctx.macros.run(name, signal),
+      { onAbort: () => bot.pathfinder?.setGoal?.(null) }
+    );
+    if (!run) {
+      return { ok: false, status: 409, error: 'Không thể khởi chạy macro vì tác vụ hiện tại đang bận' };
+    }
+    if (wait === false) {
+      run.promise.catch(() => {});
+      return { ok: true, status: 'ACCEPTED', macro: name };
+    }
+    const res = await run.promise;
+    return { ok: Boolean(res?.ok), macro: name, ...res };
+  }
+
+  return { getDashboardState, onCommand, onControl, onInventoryAction, getNearby, getInbox, onSay, onMacro, touchMcpLease };
 }

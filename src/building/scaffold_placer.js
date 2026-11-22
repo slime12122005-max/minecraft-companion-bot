@@ -133,6 +133,9 @@ export async function buildBlueprint(builder, args = {}, signal) {
       }
 
       await builder._moveWithinReach(target, signal);
+      if (builder._isOwnerInside?.(target)) {
+        throw new Error(`Cannot place ${wanted.name} at ${target.x},${target.y},${target.z}: owner is standing inside target block`);
+      }
       await builder.bot.equip(item, 'hand');
       await builder._placeOriented(support.block, support.face, wanted.properties);
 

@@ -244,3 +244,72 @@ test('farmCrops waits and collects dropped seeds when starting with empty invent
   assert.deepEqual(res, { harvested: 1, replanted: 1 });
   assert.deepEqual(placed, [1]);
 });
+
+test('digTunnel checks canHarvest after equipForBlock (including null heldItem) and places torches using blockLight + skyLight', async () => {
+  // 1) canHarvest blocks mining obsidian with wrong/missing held item after equipForBlock
+  let dugCalled = false;
+  let equipForBlockCalled = false;
+  let canHarvestArg = 'unset';
+  const obsBot = {
+    entity: { position: new Vec3(0, 64, 0), yaw: 0 },
+    heldItem: null,
+    inventory: { items: () => [] },
+    tool: { equipForBlock: async () => { equipForBlockCalled = true; } },
+    blockAt: (p) => {
+      if (p.z === -1 && p.y === 65) {
+        return {
+          name: 'obsidian',
+          position: p,
+          diggable: true,
+          canHarvest: (heldType) => {
+            canHarvestArg = heldType;
+            return false;
+          },
+        };
+      }
+      return { name: 'stone', position: p, diggable: true };
+    },
+    dig: async () => { dugCalled = true; },
+    pathfinder: { goto: async () => {} },
+  };
+  const obsMgr = new MiningFarmingManager(obsBot);
+  const stopObs = await obsMgr.digTunnel(2);
+  assert.equal(equipForBlockCalled, true);
+  assert.equal(canHarvestArg, null);
+  assert.equal(dugCalled, false);
+  assert.match(stopObs.stoppedReason, /không đủ cấp.*obsidian/);
+
+  // 2) _shouldPlaceTorch skips sunny outdoor (blockLight=0, skyLight=15, isDay=true)
+  //    and places in dark tunnel (skyLight=0) or outdoor night (isDay=false)
+  let torchPlacements = 0;
+  let curSkyLight = 15;
+  let curIsDay = true;
+  const torchBot = {
+    entity: { position: new Vec3(0, 64, 0), yaw: 0 },
+    time: { get isDay() { return curIsDay; } },
+    world: {
+      getBlockLight: () => 0,
+      getSkyLight: () => curSkyLight,
+    },
+    inventory: { items: () => [{ name: 'torch', count: 10 }] },
+    blockAt: (p) => (p.y < 64
+      ? { name: 'stone', boundingBox: 'block', position: p }
+      : { name: 'air', position: p }),
+    equip: async () => {},
+    placeBlock: async () => { torchPlacements += 1; },
+    dig: async () => {},
+    pathfinder: { goto: async () => {} },
+  };
+  const torchMgr = new MiningFarmingManager(torchBot);
+  await torchMgr.digTunnel(2);
+  assert.equal(torchPlacements, 0);
+
+  curSkyLight = 0;
+  await torchMgr.digTunnel(1);
+  assert.equal(torchPlacements, 1);
+
+  curSkyLight = 15;
+  curIsDay = false;
+  await torchMgr.digTunnel(1);
+  assert.equal(torchPlacements, 2);
+});

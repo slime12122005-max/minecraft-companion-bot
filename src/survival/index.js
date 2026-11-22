@@ -12,6 +12,8 @@ import {
   saveWaypoint,
   getWaypoint,
   listWaypoints,
+  isSafeSleepDimension,
+  findSafeSleepBed,
 } from './shelter_routine.js';
 import { scanNearbyThreats } from './threat_radar.js';
 import {
@@ -29,7 +31,7 @@ import {
 } from './gather_tree.js';
 import { ensurePickaxe, gather, giveToOwner } from './gather.js';
 
-export { resolveCandidateNames, scanNearbyThreats };
+export { resolveCandidateNames, scanNearbyThreats, isSafeSleepDimension, findSafeSleepBed };
 
 export class SurvivalManager {
   constructor(bot, config = {}, { memory = null, home = null, crafting = null, log = () => {} } = {}) {

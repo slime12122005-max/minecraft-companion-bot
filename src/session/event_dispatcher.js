@@ -2,6 +2,8 @@ import pf from 'mineflayer-pathfinder';
 const { goals } = pf;
 import { SESSION_STATES } from './state_machine.js';
 import { configureMovements, formatError } from './task_helpers.js';
+import { findSafeSleepBed } from '../survival/index.js';
+import { TASK_TIERS } from '../tasks.js';
 
 export function bindSessionEvents(ctx) {
   const {
@@ -36,6 +38,7 @@ export function bindSessionEvents(ctx) {
     state.disconnected = false;
     ctx.pushInbox?.({
       kind: 'spawn',
+      role: 'SYSTEM',
       username: bot.username,
       message: 'Bot đã vào thế giới',
     });
@@ -69,6 +72,7 @@ export function bindSessionEvents(ctx) {
     survival.recordDeath(bot.entity, bot.game?.dimension);
     ctx.pushInbox?.({
       kind: 'death',
+      role: 'SYSTEM',
       username: bot.username,
       message: 'Bot đã chết',
       position: bot.entity?.position ? {
@@ -85,10 +89,7 @@ export function bindSessionEvents(ctx) {
     if (disposed) return;
     if (!entity || entity.username !== config.owner) return;
     if (combat.busy || bot.isSleeping) return;
-    const bed = bot.findBlock({
-      matching: b => b && bot.isABed(b) && !bot.parseBedMetadata?.(b)?.occupied,
-      maxDistance: 16,
-    });
+    const bed = findSafeSleepBed(bot, entity, 16);
     if (!bed) return;
     ctx.stopCurrentTask('Ngủ cùng chủ');
     const run = tasks.run({ name: 'ngu_cung_chu' }, async (signal) => {
@@ -102,11 +103,13 @@ export function bindSessionEvents(ctx) {
 
   const onChat = (username, message) => {
     if (disposed) return;
+    const isOwner = username === config.owner;
     const inboxEntry = username !== bot.username
       ? ctx.pushInbox?.({
           kind: 'chat',
+          role: isOwner ? 'OWNER_TRUSTED' : 'UNTRUSTED_PUBLIC_PLAYER',
           username,
-          isOwner: username === config.owner,
+          isOwner,
           viaWhisper: false,
           message,
         })
@@ -116,11 +119,13 @@ export function bindSessionEvents(ctx) {
 
   const onWhisper = (username, message) => {
     if (disposed) return;
+    const isOwner = username === config.owner;
     const inboxEntry = username !== bot.username
       ? ctx.pushInbox?.({
           kind: 'whisper',
+          role: isOwner ? 'OWNER_TRUSTED' : 'UNTRUSTED_PUBLIC_PLAYER',
           username,
-          isOwner: username === config.owner,
+          isOwner,
           viaWhisper: true,
           message,
         })
@@ -202,6 +207,14 @@ export function bindSessionEvents(ctx) {
         }
         if (!combat.busy && !tasks.active) {
           survival.pickupNearbyItem();
+          if (!survival.busy && ctx.smelting?.hasReadyJob?.({ maxDistance: 32 })) {
+            const run = tasks.run(
+              { name: 'thu_lo_nung' },
+              (signal) => ctx.smelting.collectReadyOutputs(signal),
+              { onAbort: () => bot.pathfinder?.setGoal?.(null), priority: TASK_TIERS.BACKGROUND }
+            );
+            run?.promise?.catch?.(() => {});
+          }
           const cond = survival.checkAutoReturnCondition({ busy: combat.busy || !!tasks.active });
           if (cond) {
             bot.chat(`Tôi tự về nhà vì ${cond.reason}.`);
@@ -222,6 +235,7 @@ export function bindSessionEvents(ctx) {
     if (disposed) return;
     ctx.pushInbox?.({
       kind: 'kicked',
+      role: 'SYSTEM',
       username: bot.username,
       message: typeof reason === 'string' ? reason : JSON.stringify(reason),
     });

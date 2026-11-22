@@ -11,6 +11,8 @@ import { HomeManager } from '../home.js';
 import { Builder } from '../building/index.js';
 import { SurvivalManager } from '../survival/index.js';
 import { CraftManager } from '../crafting.js';
+import { SmeltingManager } from '../smelting.js';
+import { MacroRunner, createSessionMacroHandlers } from '../skills/macro_runner.js';
 import { MiningFarmingManager } from '../mining_farming.js';
 import { DashboardServer } from '../dashboard.js';
 import { BotStateMachine } from './state_machine.js';
@@ -43,6 +45,7 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     connected: false,
     disconnected: false,
     aiPaused: false,
+    mcpLeaseUntil: 0,
     lastCombatEndedAt: 0,
     pendingBuild: null,
     pendingAction: null,
@@ -57,6 +60,14 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
   const isWorkInterrupted = () => Boolean(combat.busy || tasks.paused || survival.busy || (Date.now() - state.lastCombatEndedAt < 500));
   const crafting = new CraftManager(bot, config, {
     log: logFor('craft'),
+    isPaused: isWorkPaused,
+    isInterrupted: isWorkInterrupted,
+    home,
+  });
+  const smelting = new SmeltingManager(bot, config, {
+    memory,
+    crafting,
+    log: logFor('smelt'),
     isPaused: isWorkPaused,
     isInterrupted: isWorkInterrupted,
   });
@@ -166,10 +177,12 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     equipment,
     home,
     crafting,
+    smelting,
     survival,
     mining,
     combat,
     builder,
+    macros: null,
     stateMachine,
     watchdog,
     externalDashboard,
@@ -186,6 +199,8 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
   };
 
   Object.assign(ctx, createTaskHelpers(ctx));
+  const macros = new MacroRunner(createSessionMacroHandlers(ctx), { log: logFor('macro') });
+  ctx.macros = macros;
   Object.assign(ctx, createChatHandler(ctx));
   Object.assign(ctx, createCommandDispatcher(ctx));
 
@@ -206,6 +221,8 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     onGetNearby: bridge.getNearby,
     getInbox: bridge.getInbox,
     onSay: bridge.onSay,
+    onMacro: bridge.onMacro,
+    onMcpActivity: bridge.touchMcpLease,
   });
   ctx.dashboard = dashboard;
 
@@ -217,6 +234,8 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     externalDashboard.onGetNearby = bridge.getNearby;
     externalDashboard.getInbox = bridge.getInbox;
     externalDashboard.onSay = bridge.onSay;
+    externalDashboard.onMacro = bridge.onMacro;
+    externalDashboard.onMcpActivity = bridge.touchMcpLease;
     if (onConnect) externalDashboard.onConnect = onConnect;
   } else if (config.dashboard?.enabled && loadPlugins !== false) {
     dashboard.start().catch(err => errorFor('web', err.message));
@@ -233,6 +252,8 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     home,
     builder,
     crafting,
+    smelting,
+    macros,
     mining,
     dashboard,
     stateMachine,

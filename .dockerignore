@@ -6,3 +6,7 @@ data
 *.log
 coverage
 .DS_Store
+test
+*.db
+*.db-*
+*.sqlite*

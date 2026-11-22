@@ -147,7 +147,8 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
           for (let i = 0; i < steps.length; i++) {
             if (signal.aborted) break;
             let step = steps[i];
-            if (step.type === 'unknown') {
+            const mcpLeaseActive = !chatCtx?.fromApi && Date.now() < (state.mcpLeaseUntil || 0);
+            if (step.type === 'unknown' && !mcpLeaseActive) {
               if (config.chat?.enabled !== false && chatLlm?.isAvailable?.() && chatLlm.provider !== 'typesafe') {
                 try {
                   const chatRes = await chatLlm.interpretChat({

@@ -228,6 +228,21 @@ export function createTaskHelpers(ctx) {
 
   function startDeathRecoveryTask(death, replyFn) {
     if (!death) return false;
+    if (death.unrecoverable) {
+      replyFn(`Vị trí chết ở ${death.unrecoverableReason || 'vùng nguy hiểm'} không thể tự nhặt an toàn.`);
+      return false;
+    }
+    if (bot.entity?.position) {
+      const dist = Math.hypot(
+        bot.entity.position.x - death.x,
+        bot.entity.position.y - death.y,
+        bot.entity.position.z - death.z
+      );
+      if (dist > 600) {
+        replyFn(`Điểm chết quá xa (${Math.round(dist)}m), chờ lệnh của chủ nhân.`);
+        return false;
+      }
+    }
     stopCurrentTask('Đi nhặt lại đồ sau khi chết');
     replyFn(`Tôi đang chạy tới chỗ chết (${death.x}, ${death.y}, ${death.z}) để nhặt lại đồ.`);
     const run = tasks.run({ name: 'nhat_do_chet', ...death }, async (signal) => {
@@ -237,6 +252,7 @@ export function createTaskHelpers(ctx) {
       });
       await sleep(1500);
       if (signal.aborted) return;
+      await ctx.equipment?.maintain?.().catch?.(() => {});
       survival.clearDeath();
       await memory.flush();
       replyFn('Đã tới vị trí chết để nhặt lại đồ.');

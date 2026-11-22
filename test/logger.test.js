@@ -72,3 +72,28 @@ test('Logger supports ndjson disk format and structured recentEntries()', async 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Logger stdioMode writes all console output to stderr without touching stdout', () => {
+  const stderrOut = [];
+  const origWrite = process.stderr.write.bind(process.stderr);
+  const origConsoleLog = console.log;
+  const stdoutCalls = [];
+  process.stderr.write = (chunk) => {
+    stderrOut.push(String(chunk));
+    return true;
+  };
+  console.log = (...a) => stdoutCalls.push(a);
+
+  try {
+    const logger = new Logger({ file: null, consoleOutput: true, stdioMode: true });
+    logger.scoped('mcp')('hello stderr');
+    logger.warn('mcp', 'warn stderr');
+    logger.error('mcp', 'err stderr');
+    assert.equal(stdoutCalls.length, 0);
+    assert.equal(stderrOut.length, 3);
+    assert.match(stderrOut[0], /\[mcp\] hello stderr/);
+  } finally {
+    process.stderr.write = origWrite;
+    console.log = origConsoleLog;
+  }
+});

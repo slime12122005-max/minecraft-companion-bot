@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SwarmCoordinator, SWARM_ROLES } from '../src/swarm/coordinator.js';
+import { SwarmCoordinator, SWARM_ROLES, ClaimRegistry, computeEscortArcPositions } from '../src/swarm/coordinator.js';
 import { Memory } from '../src/memory.js';
 
 test('SwarmCoordinator routes tasks by role, balances load, and handles busy workers', () => {
@@ -121,5 +121,44 @@ test('SwarmCoordinator broadcastAlert notifies peers and syncs POIs/events to SQ
   } finally {
     mem.close();
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('SwarmCoordinator ClaimRegistry enforces TTL, renews heartbeat via withClaim, releases on unregister, and computes escort arc', async () => {
+  const swarm = new SwarmCoordinator({ log: () => {}, claimTtlMs: 80 });
+  swarm.registerBot('b1', { role: 'miner' });
+  swarm.registerBot('b2', { role: 'miner' });
+
+  const c1 = swarm.tryClaimBlock({ x: 10, y: 64, z: -5 }, 'b1');
+  assert.equal(c1.ok, true);
+  const c2 = swarm.tryClaimBlock({ x: 10, y: 64, z: -5 }, 'b2');
+  assert.equal(c2.ok, false);
+  assert.equal(c2.reason, 'ALREADY_CLAIMED');
+  assert.equal(c2.owner, 'b1');
+
+  // Unregistering b1 frees all of b1's claims immediately
+  swarm.unregisterBot('b1');
+  const c3 = swarm.tryClaimBlock({ x: 10, y: 64, z: -5 }, 'b2');
+  assert.equal(c3.ok, true);
+
+  // withClaim renews heartbeat past initial TTL and always releases in finally even on error
+  const claims = new ClaimRegistry({ defaultTtlMs: 45 });
+  await assert.rejects(
+    claims.withClaim('block:0,64,0', 'b2', async () => {
+      await new Promise(r => setTimeout(r, 75));
+      assert.equal(claims.getClaim('block:0,64,0')?.botId, 'b2');
+      throw new Error('obsidian aborted');
+    }, { ttlMs: 45, heartbeatMs: 15 }),
+    /obsidian aborted/
+  );
+  assert.equal(claims.getClaim('block:0,64,0'), null);
+
+  // Escort arc places bots behind owner (yaw=0 -> facing north -z, so bots are behind at +z) at R=3.2
+  const arc = computeEscortArcPositions({ x: 0, y: 64, z: 0 }, 0, 3, { radius: 3.2 });
+  assert.equal(arc.length, 3);
+  for (const spot of arc) {
+    const dist = Math.hypot(spot.x, spot.z);
+    assert.ok(Math.abs(dist - 3.2) < 0.05);
+    assert.ok(spot.z > 0);
   }
 });

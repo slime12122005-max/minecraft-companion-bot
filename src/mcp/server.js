@@ -226,6 +226,26 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'mc_run_macro',
+    description: 'Chạy quy trình kỹ năng gộp (macro) sinh tồn nhiều bước trong 1 lần gọi: chuẩn bị đồ đi hang hoặc về nhà cất quặng/thu lò.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        macro: {
+          type: 'string',
+          enum: ['prepare_caving_kit', 'deposit_mining_loot'],
+          description: 'Tên macro cần thực thi.',
+        },
+        wait: {
+          type: 'boolean',
+          description: 'Chờ hoàn thành toàn bộ macro trước khi trả kết quả (mặc định true; đặt false để nhận ACCEPTED ngay).',
+        },
+      },
+      required: ['macro'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function filterInboxMessages(messages = [], { ownerOnly = false, unhandledOnly = false } = {}) {
@@ -284,7 +304,9 @@ export function createMcpHandler({
   const pollMs = Math.max(10, Number(pollIntervalMs) || 1000);
 
   async function requestJson(endpoint, { method = 'GET', body = undefined } = {}) {
-    const headers = {};
+    const headers = {
+      'X-Mcp-Client': '1',
+    };
     if (authToken) {
       headers.Authorization = `Bearer ${authToken}`;
     }
@@ -514,6 +536,16 @@ export function createMcpHandler({
           newMessages: filterInboxMessages(latestInbox.messages, { ownerOnly, unhandledOnly }),
           state: compactState(latestState),
         };
+      }
+
+      case 'mc_run_macro': {
+        const macro = String(input.macro ?? '').trim();
+        if (!macro) throw new Error('Thiếu tham số macro');
+        const wait = input.wait !== false;
+        return await requestJson('/api/macro', {
+          method: 'POST',
+          body: { macro, wait },
+        });
       }
 
       default:

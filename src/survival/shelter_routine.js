@@ -4,12 +4,25 @@ import { normalizeText } from '../commands.js';
 
 export function recordDeath(ctx, entity, dimension = 'overworld') {
   if (!entity?.position) return null;
+  const pos = entity.position;
+  let unrecoverableReason = null;
+  if (pos.y < -64) {
+    unrecoverableReason = 'void';
+  } else if (typeof ctx.bot?.blockAt === 'function') {
+    const feet = ctx.bot.blockAt(pos);
+    const belowPos = typeof pos.offset === 'function' ? pos.offset(0, -1, 0) : { x: pos.x, y: pos.y - 1, z: pos.z };
+    const below = ctx.bot.blockAt(belowPos);
+    if (String(feet?.name ?? '').toLowerCase().includes('lava') || String(below?.name ?? '').toLowerCase().includes('lava')) {
+      unrecoverableReason = 'lava';
+    }
+  }
   const death = {
-    x: Math.round(entity.position.x),
-    y: Math.round(entity.position.y),
-    z: Math.round(entity.position.z),
+    x: Math.round(pos.x),
+    y: Math.round(pos.y),
+    z: Math.round(pos.z),
     dimension: String(dimension),
     diedAt: Date.now(),
+    ...(unrecoverableReason ? { unrecoverable: true, unrecoverableReason } : {}),
   };
   ctx.memory?.set('lastDeath', death);
   ctx.memory?.upsertPoi?.({
@@ -19,27 +32,58 @@ export function recordDeath(ctx, entity, dimension = 'overworld') {
     x: death.x,
     y: death.y,
     z: death.z,
-    metadata: { diedAt: death.diedAt },
+    metadata: { diedAt: death.diedAt, unrecoverable: death.unrecoverable, reason: unrecoverableReason },
   });
   ctx.memory?.recordEvent?.({
     eventType: 'death',
-    summary: `Chết tại ${death.x}, ${death.y}, ${death.z}`,
+    summary: `Chết tại ${death.x}, ${death.y}, ${death.z}${unrecoverableReason ? ` (${unrecoverableReason})` : ''}`,
     x: death.x,
     y: death.y,
     z: death.z,
   });
-  ctx.log(`💀 Ghi nhận vị trí chết tại ${death.x}, ${death.y}, ${death.z}`);
+  ctx.log(`💀 Ghi nhận vị trí chết tại ${death.x}, ${death.y}, ${death.z}${unrecoverableReason ? ` [${unrecoverableReason}]` : ''}`);
   return death;
 }
 
-export function getPendingDeathRecovery(ctx, { maxAgeMs = 240000, currentDimension = null } = {}) {
+export function getPendingDeathRecovery(ctx, { maxAgeMs = 240000, currentDimension = null, allowUnrecoverable = false } = {}) {
   const death = ctx.memory?.get('lastDeath');
   if (!death) return null;
+  if (!allowUnrecoverable && death.unrecoverable) return null;
   if (Date.now() - death.diedAt > maxAgeMs) return null;
   if (currentDimension && death.dimension && String(currentDimension) !== String(death.dimension)) {
     return null;
   }
   return death;
+}
+
+export function isSafeSleepDimension(dimension) {
+  if (!dimension) return true;
+  const dim = String(dimension).toLowerCase();
+  if (dim.includes('nether') || dim.includes('the_end') || dim.endsWith(':end') || dim === 'end') {
+    return false;
+  }
+  return dim === 'overworld' || dim.endsWith(':overworld');
+}
+
+export function findSafeSleepBed(bot, ownerEntity = null, maxDistance = 16) {
+  if (!bot || typeof bot.findBlock !== 'function') return null;
+  if (!isSafeSleepDimension(bot.game?.dimension)) return null;
+  return bot.findBlock({
+    matching: (b) => {
+      if (!b || !bot.isABed?.(b)) return false;
+      const parsed = bot.parseBedMetadata?.(b);
+      const props = b.getProperties?.() ?? b.properties ?? {};
+      if (parsed?.occupied || props.occupied === true || props.occupied === 'true') return false;
+      if (ownerEntity?.position && b.position) {
+        const dist = typeof b.position.distanceTo === 'function'
+          ? b.position.distanceTo(ownerEntity.position)
+          : Math.hypot(b.position.x - ownerEntity.position.x, b.position.y - ownerEntity.position.y, b.position.z - ownerEntity.position.z);
+        if (dist < 1.2) return false;
+      }
+      return true;
+    },
+    maxDistance,
+  });
 }
 
 export function clearDeath(ctx) {

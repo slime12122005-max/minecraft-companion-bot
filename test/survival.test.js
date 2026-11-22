@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SurvivalManager } from '../src/survival.js';
+import { SurvivalManager, isSafeSleepDimension, findSafeSleepBed } from '../src/survival.js';
 import { Memory } from '../src/memory.js';
 
 function pos(x, y, z) {
@@ -947,4 +947,43 @@ test('gather skips blocks adjacent to lava, stops on mid-gather pickaxe breakage
   const s3 = new SurvivalManager(fullBot);
   assert.equal(await s3.gather('đá', 2), 0);
   assert.equal(fullCollectCalls, 0);
+});
+
+test('recordDeath marks lava/void deaths as unrecoverable and sleep helpers enforce safe dimension and owner bed distance', () => {
+  const memory = new Memory({ autoSaveMs: 0 });
+  const lavaBot = {
+    blockAt: () => ({ name: 'lava' }),
+  };
+  const sLava = new SurvivalManager(lavaBot, {}, { memory });
+  const dLava = sLava.recordDeath({ position: pos(10, 12, 10) }, 'overworld');
+  assert.equal(dLava.unrecoverable, true);
+  assert.equal(dLava.unrecoverableReason, 'lava');
+  assert.equal(sLava.getPendingDeathRecovery(), null);
+
+  const voidBot = { blockAt: () => ({ name: 'air' }) };
+  const sVoid = new SurvivalManager(voidBot, {}, { memory });
+  const dVoid = sVoid.recordDeath({ position: pos(0, -70, 0) }, 'the_end');
+  assert.equal(dVoid.unrecoverable, true);
+  assert.equal(dVoid.unrecoverableReason, 'void');
+
+  assert.equal(isSafeSleepDimension('overworld'), true);
+  assert.equal(isSafeSleepDimension('minecraft:overworld'), true);
+  assert.equal(isSafeSleepDimension('the_nether'), false);
+  assert.equal(isSafeSleepDimension('minecraft:the_end'), false);
+
+  const owner = { position: pos(5, 64, 5) };
+  const beds = [
+    { name: 'red_bed', position: pos(5, 64, 5), properties: { occupied: false } }, // owner's bed (<1.2 blocks)
+    { name: 'blue_bed', position: pos(8, 64, 5), properties: { occupied: false } }, // safe free bed
+  ];
+  const overworldBot = {
+    game: { dimension: 'overworld' },
+    isABed: (b) => b.name.endsWith('_bed'),
+    findBlock: ({ matching }) => beds.find(matching) ?? null,
+  };
+  const chosenBed = findSafeSleepBed(overworldBot, owner, 16);
+  assert.equal(chosenBed?.name, 'blue_bed');
+
+  const netherBot = { ...overworldBot, game: { dimension: 'the_nether' } };
+  assert.equal(findSafeSleepBed(netherBot, owner, 16), null);
 });

@@ -328,7 +328,7 @@ test('MCP Stdio subprocess communicates end-to-end with live DashboardServer', a
     assert.equal(parseErr.error.code, -32700);
 
     const toolsRes = await sendReq(2, 'tools/list');
-    assert.equal(toolsRes.result.tools.length, 9);
+    assert.equal(toolsRes.result.tools.length, TOOLS.length);
 
     const call = async (id, name, args) => {
       const res = await sendReq(id, 'tools/call', { name, arguments: args });
@@ -604,6 +604,141 @@ test('createBotSession with chat.mcpChat defers greet/ack/unknown to Antigravity
     );
   } finally {
     await session.cleanup();
+    await mem.close?.();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('MCP cross-process ControlLease suppresses internal LLM, tags inbox roles, preserves emergency commands, and runs mc_run_macro', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-lease-'));
+  const mem = new Memory({ dbPath: path.join(dir, 'mem.db') });
+  await mem.load();
+  const tasks = new TaskCoordinator({ log: () => {} });
+  const router = new CommandRouter();
+  const inboxState = { seq: 0, items: [] };
+  const chats = [];
+  let llmCalls = 0;
+  let fakeBot;
+
+  const dash = new DashboardServer({
+    host: '127.0.0.1',
+    port: 0,
+    getState: () => ({}),
+    onCommand: async () => ({}),
+    log: () => {},
+  });
+  const addr = await dash.start();
+
+  const session = createBotSession(
+    { ...DEFAULT_CONFIG, chat: { ...DEFAULT_CONFIG.chat, enabled: true, humanReply: false, mcpChat: false } },
+    {
+      llm: {
+        apiKey: 'dummy-key',
+        ask: async () => {
+          llmCalls += 1;
+          return { answers: { intent: { choice: 'farm', confidence: 0.99 }, resource: { choice: 'none', confidence: 0.9 } } };
+        },
+      },
+      chatLlm: {
+        provider: 'openrouter',
+        isAvailable: () => true,
+        interpretChat: async () => {
+          llmCalls += 1;
+          return { reply: 'internal llm reply', commands: [] };
+        },
+      },
+      memory: mem,
+      tasks,
+      router,
+      externalDashboard: dash,
+      inboxState,
+      loadPlugins: false,
+      createBotFn: () => {
+        const bot = new EventEmitter();
+        bot.username = 'bot_dong_hanh';
+        bot.version = '1.21.1';
+        bot.health = 20;
+        bot.food = 20;
+        bot.isAlive = true;
+        bot.isSleeping = false;
+        bot.game = { dimension: 'overworld' };
+        bot.registry = realRegistry;
+        bot.entity = { position: { x: 0, y: 64, z: 0 }, yaw: 0 };
+        bot.entities = {};
+        bot.players = {};
+        bot.inventory = {
+          slots: new Array(46).fill(null),
+          items: () => [
+            { name: 'stick', count: 8 },
+            { name: 'torch', count: 32 },
+            { name: 'stone_pickaxe', count: 1 },
+            { name: 'bread', count: 10 },
+          ],
+          emptySlotCount: () => 20,
+        };
+        bot.pathfinder = { setMovements: () => {}, setGoal: () => {} };
+        bot.equip = async () => {};
+        bot.chat = (m) => chats.push(m);
+        bot.whisper = () => {};
+        fakeBot = bot;
+        return bot;
+      },
+    }
+  );
+
+  const handle = createMcpHandler({
+    baseUrl: `http://${addr.host}:${addr.port}`,
+  });
+
+  try {
+    fakeBot.emit('spawn');
+    fakeBot.emit('chat', 'stranger', 'hello bot');
+    fakeBot.emit('chat', 'araslime', 'bạn xem quanh có gì không');
+    await new Promise(r => setTimeout(r, 20));
+    // Before lease, internal LLM handled owner chat
+    assert.equal(llmCalls, 1);
+
+    // Calling mc_get_inbox sets ControlLease across HTTP and returns role tags
+    const inboxRes = await handle({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'mc_get_inbox', arguments: { sinceId: 0, limit: 20 } },
+    });
+    const inboxData = JSON.parse(inboxRes.result.content[0].text);
+    const strangerMsg = inboxData.messages.find(m => m.username === 'stranger');
+    const ownerMsg = inboxData.messages.find(m => m.username === 'araslime');
+    const spawnMsg = inboxData.messages.find(m => m.kind === 'spawn');
+    assert.equal(strangerMsg.role, 'UNTRUSTED_PUBLIC_PLAYER');
+    assert.equal(ownerMsg.role, 'OWNER_TRUSTED');
+    assert.equal(spawnMsg.role, 'SYSTEM');
+
+    const stateData = dash.getState();
+    assert.equal(stateData.mcpLeaseActive, true);
+
+    // Under active ControlLease: natural unknown chat does NOT call internal LLM, while !stop still runs immediately
+    llmCalls = 0;
+    chats.length = 0;
+    fakeBot.emit('chat', 'araslime', 'hãy nghĩ xem nên xây nhà kiểu gì');
+    fakeBot.emit('chat', 'araslime', '!stop');
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(llmCalls, 0);
+    assert.ok(chats.some(c => c.includes('đứng yên')));
+
+    // mc_run_macro executes prepare_caving_kit end-to-end over HTTP -> Dashboard -> MacroRunner
+    const macroRes = await handle({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'mc_run_macro', arguments: { macro: 'prepare_caving_kit', wait: true } },
+    });
+    const macroData = JSON.parse(macroRes.result.content[0].text);
+    assert.equal(macroData.ok, true);
+    assert.equal(macroData.macro, 'prepare_caving_kit');
+    assert.equal(macroData.completedSteps.length, 5);
+  } finally {
+    await session.cleanup();
+    await dash.stop();
     await mem.close?.();
     await fs.rm(dir, { recursive: true, force: true });
   }

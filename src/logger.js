@@ -8,6 +8,7 @@ export class Logger {
     maxFiles = 5,
     format = 'text',
     consoleOutput = true,
+    stdioMode = null,
     maxBuffer = 100,
   } = {}) {
     this.file = file;
@@ -15,6 +16,9 @@ export class Logger {
     this.maxFiles = Math.max(1, Number(maxFiles) || 1);
     this.format = format === 'ndjson' ? 'ndjson' : 'text';
     this.consoleOutput = consoleOutput;
+    this.stdioMode = stdioMode != null
+      ? Boolean(stdioMode)
+      : (String(process.env.MCP_STDIO_MODE || '').toLowerCase() === 'true' || process.env.MCP_STDIO_MODE === '1');
     this.maxBuffer = maxBuffer;
     this.buffer = [];
     this.entries = [];
@@ -78,9 +82,15 @@ export class Logger {
     }
 
     if (this.consoleOutput) {
-      if (level === 'ERR') console.error(`[${tag}]`, ...args);
-      else if (level === 'WARN') console.warn(`[${tag}]`, ...args);
-      else console.log(`[${tag}]`, ...args);
+      if (this.stdioMode) {
+        process.stderr.write(`[${tag}] ${msg}\n`);
+      } else if (level === 'ERR') {
+        console.error(`[${tag}]`, ...args);
+      } else if (level === 'WARN') {
+        console.warn(`[${tag}]`, ...args);
+      } else {
+        console.log(`[${tag}]`, ...args);
+      }
     }
     if (this.file) {
       try {

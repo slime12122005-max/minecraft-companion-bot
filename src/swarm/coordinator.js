@@ -1,6 +1,145 @@
 export const SWARM_ROLES = Object.freeze(['miner', 'carrier', 'guard', 'builder', 'general']);
 const ROLE_SET = new Set(SWARM_ROLES);
 const MAX_ALERT_HISTORY = 100;
+const DEFAULT_CLAIM_TTL_MS = 15_000;
+const DEFAULT_HEARTBEAT_MS = 5_000;
+
+export function computeEscortArcPositions(ownerPos, ownerYaw = 0, botCount = 1, { radius = 3.2, spreadRad = Math.PI / 4 } = {}) {
+  if (!ownerPos || botCount <= 0) return [];
+  const count = Math.max(1, Math.floor(Number(botCount) || 1));
+  const r = Math.max(1.5, Number(radius) || 3.2);
+  // In Mineflayer: yaw=0 -> north (-z), PI/2 -> west (-x), -PI/2 -> east (+x), PI -> south (+z)
+  const forwardAngle = Math.atan2(-Math.cos(ownerYaw), -Math.sin(ownerYaw));
+  const spots = [];
+  for (let k = 0; k < count; k++) {
+    const alpha = forwardAngle + Math.PI + (k - (count - 1) / 2) * spreadRad;
+    spots.push({
+      index: k,
+      angle: alpha,
+      x: Number((ownerPos.x + r * Math.cos(alpha)).toFixed(3)),
+      y: ownerPos.y,
+      z: Number((ownerPos.z + r * Math.sin(alpha)).toFixed(3)),
+    });
+  }
+  return spots;
+}
+
+export class ClaimRegistry {
+  constructor({ defaultTtlMs = DEFAULT_CLAIM_TTL_MS } = {}) {
+    this.defaultTtlMs = Math.max(100, Number(defaultTtlMs) || DEFAULT_CLAIM_TTL_MS);
+    this._claims = new Map();
+  }
+
+  static blockKey(pos) {
+    return `block:${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`;
+  }
+
+  static entityKey(entityId) {
+    return `entity:${entityId}`;
+  }
+
+  pruneExpired(now = Date.now()) {
+    let removed = 0;
+    for (const [key, entry] of this._claims.entries()) {
+      if (entry.expiresAt <= now) {
+        this._claims.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  getClaim(key, { now = Date.now() } = {}) {
+    const existing = this._claims.get(String(key));
+    if (!existing) return null;
+    if (existing.expiresAt <= now) {
+      this._claims.delete(String(key));
+      return null;
+    }
+    return { ...existing };
+  }
+
+  tryClaim(key, botId, { ttlMs = this.defaultTtlMs, now = Date.now() } = {}) {
+    const k = String(key);
+    const owner = String(botId ?? '').trim();
+    if (!k || !owner) return { ok: false, reason: 'INVALID_CLAIM_ARGS' };
+    const ttl = Math.max(50, Number(ttlMs) || this.defaultTtlMs);
+    const existing = this.getClaim(k, { now });
+    if (existing && existing.botId !== owner) {
+      return { ok: false, reason: 'ALREADY_CLAIMED', owner: existing.botId, expiresAt: existing.expiresAt };
+    }
+    const entry = { key: k, botId: owner, claimedAt: existing?.claimedAt ?? now, expiresAt: now + ttl };
+    this._claims.set(k, entry);
+    return { ok: true, claim: { ...entry } };
+  }
+
+  tryClaimBlock(pos, botId, opts = {}) {
+    if (!pos) return { ok: false, reason: 'INVALID_POS' };
+    return this.tryClaim(ClaimRegistry.blockKey(pos), botId, opts);
+  }
+
+  tryClaimEntity(entityId, botId, opts = {}) {
+    if (entityId == null) return { ok: false, reason: 'INVALID_ENTITY' };
+    return this.tryClaim(ClaimRegistry.entityKey(entityId), botId, opts);
+  }
+
+  renewClaim(key, botId, { ttlMs = this.defaultTtlMs, now = Date.now() } = {}) {
+    const k = String(key);
+    const owner = String(botId ?? '').trim();
+    const existing = this.getClaim(k, { now });
+    if (!existing) return { ok: false, reason: 'NOT_CLAIMED' };
+    if (existing.botId !== owner) return { ok: false, reason: 'NOT_CLAIM_OWNER', owner: existing.botId };
+    const ttl = Math.max(50, Number(ttlMs) || this.defaultTtlMs);
+    existing.expiresAt = now + ttl;
+    this._claims.set(k, existing);
+    return { ok: true, claim: { ...existing } };
+  }
+
+  releaseClaim(key, botId = null) {
+    const k = String(key);
+    const existing = this._claims.get(k);
+    if (!existing) return false;
+    if (botId != null && existing.botId !== String(botId).trim()) return false;
+    return this._claims.delete(k);
+  }
+
+  releaseAllForBot(botId) {
+    const owner = String(botId ?? '').trim();
+    let count = 0;
+    for (const [k, entry] of this._claims.entries()) {
+      if (entry.botId === owner) {
+        this._claims.delete(k);
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  async withClaim(key, botId, fn, { ttlMs = this.defaultTtlMs, heartbeatMs = DEFAULT_HEARTBEAT_MS, signal = null } = {}) {
+    const acquired = this.tryClaim(key, botId, { ttlMs });
+    if (!acquired.ok) return acquired;
+
+    const intervalMs = Math.max(10, Number(heartbeatMs) || DEFAULT_HEARTBEAT_MS);
+    const timer = setInterval(() => {
+      if (signal?.aborted) return;
+      this.renewClaim(key, botId, { ttlMs });
+    }, intervalMs);
+    timer.unref?.();
+
+    try {
+      const result = await fn(signal);
+      return { ok: true, result };
+    } finally {
+      clearInterval(timer);
+      this.releaseClaim(key, botId);
+    }
+  }
+
+  size({ now = Date.now() } = {}) {
+    this.pruneExpired(now);
+    return this._claims.size;
+  }
+}
 
 function normalizeRole(role) {
   const r = String(role ?? 'general').trim().toLowerCase();
@@ -8,12 +147,13 @@ function normalizeRole(role) {
 }
 
 export class SwarmCoordinator {
-  constructor({ memory = null, log = () => {} } = {}) {
+  constructor({ memory = null, log = () => {}, claimTtlMs = DEFAULT_CLAIM_TTL_MS } = {}) {
     this.memory = memory;
     this.log = log;
     this.bots = new Map();
     this.transfers = [];
     this.alerts = [];
+    this.claims = new ClaimRegistry({ defaultTtlMs: claimTtlMs });
     this._seq = 0;
   }
 
@@ -46,6 +186,7 @@ export class SwarmCoordinator {
     const botId = String(id ?? '').trim();
     const existed = this.bots.delete(botId);
     if (!existed) return false;
+    this.claims.releaseAllForBot(botId);
     for (const tr of this.transfers) {
       if (tr.status === 'in_transit' && tr.carrierId === botId) {
         tr.status = 'pending';
@@ -249,6 +390,34 @@ export class SwarmCoordinator {
     return { ...alert };
   }
 
+  tryClaimBlock(pos, botId, opts) {
+    return this.claims.tryClaimBlock(pos, botId, opts);
+  }
+
+  tryClaimEntity(entityId, botId, opts) {
+    return this.claims.tryClaimEntity(entityId, botId, opts);
+  }
+
+  renewClaim(key, botId, opts) {
+    return this.claims.renewClaim(key, botId, opts);
+  }
+
+  releaseClaim(key, botId) {
+    return this.claims.releaseClaim(key, botId);
+  }
+
+  withClaim(key, botId, fn, opts) {
+    return this.claims.withClaim(key, botId, fn, opts);
+  }
+
+  getEscortFormation(ownerPos, ownerYaw = 0, botIds = null, opts = {}) {
+    const ids = Array.isArray(botIds) && botIds.length > 0
+      ? botIds
+      : Array.from(this.bots.keys());
+    const spots = computeEscortArcPositions(ownerPos, ownerYaw, ids.length, opts);
+    return ids.map((botId, idx) => ({ botId, ...spots[idx] }));
+  }
+
   status() {
     const bots = this.listBots();
     const idleBots = bots.filter(b => b.status === 'idle').length;
@@ -258,6 +427,7 @@ export class SwarmCoordinator {
       idleBots,
       busyBots,
       bots,
+      activeClaims: this.claims.size(),
       pendingTransfers: this.transfers.filter(t => t.status === 'pending').length,
       inTransitTransfers: this.transfers.filter(t => t.status === 'in_transit').length,
       completedTransfers: this.transfers.filter(t => t.status === 'completed').length,

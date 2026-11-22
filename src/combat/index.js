@@ -15,6 +15,7 @@ import {
   fleeFrom,
   isArrow,
   isBow,
+  isCreeperIgnited,
   isSafeEscapeSpot,
   isShield,
   itemName,
@@ -195,10 +196,15 @@ export class CombatController {
     const threatAssessment = evaluateThreatScore(nearby, { health, armorMitigation: armorMit });
     this.lastThreatAssessment = threatAssessment;
 
-    const urgentCreeper = nearby.find(m => m.name.toLowerCase().includes('creeper') && (m.distance < 4.5 || now < this.creeperShieldUntil));
+    const urgentCreeper = nearby.find(m =>
+      m.name.toLowerCase().includes('creeper') &&
+      (m.distance < 4.5 || now < this.creeperShieldUntil || (isCreeperIgnited(m.entity) && m.distance < 5.5))
+    );
     if (urgentCreeper) {
       this._setBusy(true);
-      if (this.config.shieldAgainstCreeper && this._hasShield()) {
+      if (isCreeperIgnited(urgentCreeper.entity)) {
+        await this._fleeFrom(urgentCreeper.entity);
+      } else if (this.config.shieldAgainstCreeper && this._hasShield()) {
         if (urgentCreeper.distance < 4.5) this.creeperShieldUntil = now + 2500;
         await this._face(urgentCreeper.entity);
         await this._raiseShield();
@@ -354,7 +360,7 @@ export class CombatController {
   _raiseShield() { return raiseShield(this); }
   _lowerShield() { return lowerShield(this); }
   _attack(target, opts) { return attack(this, target, opts); }
-  _jumpCrit(target) { return jumpCrit(this, target); }
+  _jumpCrit(target, opts) { return jumpCrit(this, target, opts); }
   _shootBow(target, bowArg) { return shootBow(this, target, bowArg); }
   _moveClose(target) { return moveClose(this, target); }
   _moveTo(entity, range) { return moveTo(this, entity, range); }

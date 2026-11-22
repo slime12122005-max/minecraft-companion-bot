@@ -16,12 +16,36 @@ const INVALID_SUPPORT_NAMES = new Set(['air', 'water', 'lava', 'short_grass', 't
 const SLEEP = ms => new Promise(r => setTimeout(r, ms));
 
 export class CraftManager {
-  constructor(bot, config = {}, { log = () => {}, isPaused = null, isInterrupted = null } = {}) {
+  constructor(bot, config = {}, { log = () => {}, isPaused = null, isInterrupted = null, home = null } = {}) {
     this.bot = bot;
     this.config = config;
     this.log = log;
     this.isPaused = isPaused;
     this.isInterrupted = isInterrupted ?? (() => Boolean(this.isPaused?.()));
+    this.home = home;
+  }
+
+  _isFarFromHome(pos) {
+    const homePos = this.home?.get?.();
+    if (!homePos || !pos) return false;
+    return Math.hypot(pos.x - homePos.x, pos.y - homePos.y, pos.z - homePos.z) > 24;
+  }
+
+  async _reclaimTemporaryTables(tempTables = []) {
+    if (!Array.isArray(tempTables) || tempTables.length === 0) return;
+    if (typeof this.bot.dig !== 'function') return;
+    for (let i = tempTables.length - 1; i >= 0; i--) {
+      const pos = tempTables[i];
+      try {
+        const block = this.bot.blockAt?.(pos);
+        if (!block || block.name !== 'crafting_table') continue;
+        if (this.bot.tool?.equipForBlock) {
+          try { await this.bot.tool.equipForBlock(block); } catch {}
+        }
+        await this.bot.dig(block);
+        this.log('🪓 Đã thu hồi bàn chế tạo tạm.');
+      } catch {}
+    }
   }
 
   _countItem(itemId) {
@@ -83,7 +107,7 @@ export class CraftManager {
     return null;
   }
 
-  async _ensureCraftingTable(signal) {
+  async _ensureCraftingTable(signal, tempTables = null) {
     const tableDef = this.bot.registry?.blocksByName?.crafting_table;
     if (tableDef && typeof this.bot.findBlock === 'function') {
       const existing = this.bot.findBlock({ matching: tableDef.id, maxDistance: 16 });
@@ -95,12 +119,17 @@ export class CraftManager {
 
     const tableItemDef = this.bot.registry?.itemsByName?.crafting_table;
     if (tableItemDef && this._countItem(tableItemDef.id) === 0) {
-      const crafted = await this._craftRecursive(tableItemDef.id, 1, 1, signal, false);
+      const crafted = await this._craftRecursive(tableItemDef.id, 1, 1, signal, false, tempTables);
       if (!crafted) return null;
     }
 
     const placed = await this._placeUtilityBlock('crafting_table');
-    if (placed) return placed;
+    if (placed) {
+      if (Array.isArray(tempTables) && placed.position && this._isFarFromHome(placed.position)) {
+        tempTables.push(placed.position);
+      }
+      return placed;
+    }
 
     if (tableDef && typeof this.bot.findBlock === 'function') {
       return this.bot.findBlock({ matching: tableDef.id, maxDistance: 16 });
@@ -128,7 +157,7 @@ export class CraftManager {
     return this._countItem(ingId) >= reqTotal;
   }
 
-  async _craftRecursive(itemId, count, depth, signal, allowTable = true) {
+  async _craftRecursive(itemId, count, depth, signal, allowTable = true, tempTables = null) {
     if (signal?.aborted) throw new Error('Đã hủy');
     if (depth > 4) return false;
 
@@ -155,7 +184,7 @@ export class CraftManager {
           if (this._countItem(ing.id) < reqTotal) {
             allSatisfied = false;
             if (ing.id === itemId) { ok = false; break; }
-            let made = await this._craftRecursive(ing.id, reqTotal, depth + 1, signal, allowTable);
+            let made = await this._craftRecursive(ing.id, reqTotal, depth + 1, signal, allowTable, tempTables);
             if (!made) {
               made = await this._trySmeltMissingIngredient(ing.id, reqTotal, signal);
             }
@@ -168,14 +197,14 @@ export class CraftManager {
 
       let tableBlock = null;
       if (recipe.requiresTable) {
-        tableBlock = await this._ensureCraftingTable(signal);
+        tableBlock = await this._ensureCraftingTable(signal, tempTables);
         if (!tableBlock) continue;
         let topUpOk = true;
         for (const ing of missing) {
           const reqTotal = Math.abs(ing.count) * craftsNeeded;
           if (this._countItem(ing.id) < reqTotal) {
             if (ing.id === itemId) { topUpOk = false; break; }
-            let made = await this._craftRecursive(ing.id, reqTotal, depth + 1, signal, allowTable);
+            let made = await this._craftRecursive(ing.id, reqTotal, depth + 1, signal, allowTable, tempTables);
             if (!made) {
               made = await this._trySmeltMissingIngredient(ing.id, reqTotal, signal);
             }
@@ -205,11 +234,18 @@ export class CraftManager {
       throw new Error('Bot chưa hỗ trợ bot.craft.');
     }
 
-    const ok = await this._craftRecursive(itemDef.id, count, 0, signal, true);
-    if (!ok) {
-      throw new Error(`Thiếu nguyên liệu để chế tạo ${count} ${itemName}.`);
+    const tempTables = [];
+    try {
+      const ok = await this._craftRecursive(itemDef.id, count, 0, signal, true, tempTables);
+      if (!ok) {
+        throw new Error(`Thiếu nguyên liệu để chế tạo ${count} ${itemName}.`);
+      }
+      return { name: itemName, count };
+    } finally {
+      if (tempTables.length > 0 && !signal?.aborted) {
+        await this._reclaimTemporaryTables(tempTables);
+      }
     }
-    return { name: itemName, count };
   }
 
   _selectFuel(items, desiredCount) {

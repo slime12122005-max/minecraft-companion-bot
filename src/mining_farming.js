@@ -180,6 +180,17 @@ export class MiningFarmingManager {
     return { safe: true };
   }
 
+  _shouldPlaceTorch(targetFeet, step) {
+    if (typeof this.bot.world?.getBlockLight === 'function') {
+      const blockLight = this.bot.world.getBlockLight(targetFeet);
+      const skyLight = typeof this.bot.world?.getSkyLight === 'function' ? this.bot.world.getSkyLight(targetFeet) : 0;
+      const tod = this.bot.time?.timeOfDay;
+      const isNight = this.bot.time?.isDay === false || (typeof tod === 'number' && tod >= 12542 && tod <= 23459);
+      return blockLight < 7 && (skyLight < 7 || isNight);
+    }
+    return step % 8 === 0;
+  }
+
   async digTunnel(length = 16, signal = null) {
     if (!this.bot.entity?.position || typeof this.bot.dig !== 'function') {
       throw new Error('Bot chưa sẵn sàng đào hầm.');
@@ -236,6 +247,10 @@ export class MiningFarmingManager {
           if (this.bot.tool?.equipForBlock) {
             try { await this.bot.tool.equipForBlock(block); } catch {}
           }
+          const heldType = this.bot.heldItem?.type ?? null;
+          if (typeof block.canHarvest === 'function' && !block.canHarvest(heldType)) {
+            return { steps: dugSteps, stoppedReason: `công cụ hiện tại không đủ cấp để đào ${block.name}` };
+          }
           await this._digSafe(block, signal);
         }
       }
@@ -244,10 +259,10 @@ export class MiningFarmingManager {
 
       dugSteps++;
 
-      if (step % 8 === 0 && typeof this.bot.placeBlock === 'function') {
+      if (this._shouldPlaceTorch(targetFeet, step) && typeof this.bot.placeBlock === 'function') {
         const torch = (this.bot.inventory?.items?.() ?? []).find(i => i?.name === 'torch');
         const floor = this.bot.blockAt(targetFeet.offset(0, -1, 0));
-        if (torch && floor && floor.name !== 'air') {
+        if (torch && floor && floor.name !== 'air' && (floor.boundingBox == null || floor.boundingBox === 'block')) {
           try {
             await this.bot.equip(torch, 'hand');
             await this.bot.placeBlock(floor, new Vec3(0, 1, 0));

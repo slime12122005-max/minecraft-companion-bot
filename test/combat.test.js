@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CombatController, evaluateThreatScore } from '../src/combat.js';
+import { getAttackCooldownMs, wouldKnockCreeperTowardOwner, isFriendlyInCursor } from '../src/combat/micro_control.js';
 
 function pos(x, y, z) {
   return {
@@ -718,4 +719,66 @@ test('evaluateThreatScore computes posture bands across health/armor and combat 
   assert.equal(weaponSituations.length, 1);
   assert.equal(weaponSituations[0].mobCount, 2);
   combat.stop();
+});
+
+test('weapon attack cooldown scales by weapon speed, creeper strafes around owner, ignited creeper flees, and entityAtCursor blocks friendly fire', async () => {
+  assert.equal(getAttackCooldownMs({ name: 'iron_sword' }), 650);
+  assert.equal(getAttackCooldownMs({ name: 'iron_axe' }), 1150);
+  assert.equal(getAttackCooldownMs(null), 250);
+
+  // 1) Axe cooldown (1150ms) blocks rapid second swing within 700ms
+  const bot = makeBot();
+  bot.heldItem = { name: 'iron_axe' };
+  let attacks = 0;
+  bot.attack = async () => { attacks += 1; };
+  bot.entities[1] = { id: 1, name: 'zombie', type: 'mob', health: 20, position: pos(2, 64, 0) };
+  const combat = new CombatController(bot, { combat: { enabled: true, crit: false, useCausality: false } });
+  combat.start();
+  await combat.tick({});
+  assert.equal(attacks, 1);
+  combat.lastAttackAt = Date.now() - 700;
+  await combat.tick({});
+  assert.equal(attacks, 1);
+
+  // 2) entityAtCursor pointing at owner blocks swing
+  const owner = { id: 99, username: 'araslime', type: 'player', position: pos(1.5, 64, 0) };
+  bot.players.araslime = { entity: owner };
+  bot.entityAtCursor = () => owner;
+  assert.equal(isFriendlyInCursor(bot, bot.entities[1], owner), true);
+  combat.lastAttackAt = 0;
+  await combat.tick({ owner: 'araslime' });
+  assert.equal(attacks, 1);
+  bot.entityAtCursor = () => null;
+  combat.stop();
+
+  // 3) Creeper knockback strafe when bot -> creeper -> owner aligns (u·v > 0)
+  assert.equal(wouldKnockCreeperTowardOwner(pos(0, 64, 0), pos(2, 64, 0), pos(4, 64, 0)), true);
+  assert.equal(wouldKnockCreeperTowardOwner(pos(2, 64, 2), pos(2, 64, 0), pos(4, 64, 0)), false);
+
+  const botCreeper = makeBot();
+  let creeperAttacks = 0;
+  let lastGoal = null;
+  botCreeper.attack = async () => { creeperAttacks += 1; };
+  botCreeper.pathfinder.setGoal = (g) => { lastGoal = g; };
+  botCreeper.players.araslime = { entity: { id: 99, username: 'araslime', type: 'player', position: pos(4.5, 64, 0) } };
+  botCreeper.entities[5] = { id: 5, name: 'creeper', type: 'mob', health: 20, position: pos(2.5, 64, 0) };
+  const c2 = new CombatController(botCreeper, { combat: { enabled: true, crit: false, shieldAgainstCreeper: false, useCausality: false } });
+  c2.start();
+  await c2._applyDecision({ action: 'melee', targetId: 5 }, { id: 5, entity: botCreeper.entities[5], distance: 2.5 }, botCreeper.players.araslime.entity);
+  assert.equal(creeperAttacks, 0);
+  assert.ok(lastGoal && Math.abs(lastGoal.z) > 0.5);
+
+  // 4) Ignited creeper always triggers immediate flee away from creeper even with shield
+  const botIgnited = makeBot();
+  const shield = { name: 'shield', slot: 10 };
+  botIgnited.inventory.items = () => [shield];
+  let fleeGoal = null;
+  botIgnited.pathfinder.setGoal = (g) => { fleeGoal = g; };
+  botIgnited.entities[6] = { id: 6, name: 'creeper', type: 'mob', health: 20, position: pos(3, 64, 0), ignited: true };
+  const c3 = new CombatController(botIgnited, { combat: { enabled: true, shieldAgainstCreeper: true } });
+  c3.start();
+  await c3.tick({});
+  assert.ok(fleeGoal && fleeGoal.x < 0);
+  c3.stop();
+  c2.stop();
 });

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { rotatePosition, SCHEMATIC_CATALOG, downloadSchematic, Builder, calculateMaterialShortage, buildSupplyPlan } from '../src/building/index.js'
+import { rotatePosition, SCHEMATIC_CATALOG, downloadSchematic, Builder, calculateMaterialShortage, buildSupplyPlan, intersectsBlockAABB } from '../src/building/index.js'
 
 const bot = { blockAt: () => null }
 
@@ -233,7 +233,7 @@ test('Builder._moveWithinReach retries escaping when standing inside target and 
       goto: async () => {
         insideCalls += 1
         if (insideCalls >= 2) {
-          botEscape.entity.position = new Vec3(6, 64, 5)
+          botEscape.entity.position = new Vec3(6.5, 64, 5.5)
         }
       },
     },
@@ -281,4 +281,41 @@ test('Builder._moveWithinReach retries escaping when standing inside target and 
   })
   await builderGrace._moveWithinReach(new Vec3(5, 64, 5))
   assert.equal(interruptedCalls, 2)
+})
+
+test('intersectsBlockAABB detects entity intersection accurately and Builder refuses burying owner', async () => {
+  const { Vec3 } = await import('vec3')
+  const pathMod = await import('node:path')
+  const blockPos = new Vec3(5, 64, 5)
+
+  // Inside AABB (|x - 5.5| < 0.8 and y overlap and |z - 5.5| < 0.8)
+  assert.equal(intersectsBlockAABB(new Vec3(6.0, 64, 5.5), blockPos), true)
+  // Outside horizontally
+  assert.equal(intersectsBlockAABB(new Vec3(6.5, 64, 5.5), blockPos), false)
+  // Above block
+  assert.equal(intersectsBlockAABB(new Vec3(5.5, 65.1, 5.5), blockPos), false)
+
+  const world = new Map([['5,63,5', { name: 'stone', position: new Vec3(5, 63, 5) }]])
+  const keyOf = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
+  const mockBot = {
+    entity: { position: new Vec3(8, 64, 5) },
+    players: { araslime: { entity: { position: new Vec3(5.6, 64, 5.4) } } },
+    inventory: { items: () => [{ name: 'oak_planks', count: 4 }] },
+    blockAt: (p) => world.get(keyOf(p)) ?? { name: 'air', position: p },
+    equip: async () => {},
+    placeBlock: async () => { throw new Error('must not place inside owner') },
+  }
+
+  const builder = new Builder(mockBot, { owner: 'araslime' })
+  builder.loadedFile = pathMod.resolve('C:/tmp/owner-aabb.schem')
+  builder.blueprint = {
+    size: { x: 1, y: 1, z: 1 },
+    blocks: [{ x: 0, y: 0, z: 0, name: 'oak_planks', properties: {} }],
+    materials: { oak_planks: 1 },
+  }
+
+  await assert.rejects(
+    builder.build({ file: 'C:/tmp/owner-aabb.schem', x: 5, y: 64, z: 5, rotation: 0 }),
+    /owner is standing inside target block/
+  )
 })

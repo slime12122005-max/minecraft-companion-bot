@@ -26,6 +26,8 @@ export class DashboardServer {
     onGetNearby = null,
     getInbox = null,
     onSay = null,
+    onMacro = null,
+    onMcpActivity = null,
     sseIntervalMs = 250,
     log = () => {},
   } = {}) {
@@ -40,6 +42,8 @@ export class DashboardServer {
     this.onGetNearby = onGetNearby;
     this.getInbox = getInbox;
     this.onSay = onSay;
+    this.onMacro = onMacro;
+    this.onMcpActivity = onMcpActivity;
     this.sseIntervalMs = Math.max(50, Number(sseIntervalMs) || 250);
     this.log = log;
     this.server = null;
@@ -50,6 +54,10 @@ export class DashboardServer {
   _isLoopbackHost(host) {
     const h = String(host ?? '').trim().toLowerCase();
     return h === '127.0.0.1' || h === 'localhost' || h === '::1';
+  }
+
+  _isMcpRequest(req) {
+    return String(req?.headers?.['x-mcp-client'] ?? '').trim() === '1';
   }
 
   _extractToken(req, url) {
@@ -214,6 +222,7 @@ export class DashboardServer {
         if (this.authToken && !this._hasValidToken(req, url)) {
           return this._sendJson(res, 401, { ok: false, error: 'Unauthorized' });
         }
+        try { this.onMcpActivity?.(); } catch {}
         const rawSince = Number(url.searchParams.get('sinceId'));
         const sinceId = Number.isInteger(rawSince) && rawSince >= 0 ? rawSince : 0;
         const rawLimit = Number(url.searchParams.get('limit'));
@@ -298,6 +307,7 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
+          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const cmd = String(body.command ?? '').trim().slice(0, 500);
           if (!cmd) return this._sendJson(res, 400, { ok: false, error: 'command required' });
@@ -316,6 +326,7 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
+          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const message = String(body.message ?? '').trim().slice(0, 500);
           if (!message) return this._sendJson(res, 400, { ok: false, error: 'message required' });
@@ -341,6 +352,7 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
+          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const action = String(body.action ?? '').trim();
           if (!VALID_CONTROLS.has(action)) {
@@ -358,6 +370,7 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
+          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const action = String(body.action ?? '').trim();
           const itemName = String(body.itemName ?? '').trim().slice(0, 120);
@@ -368,6 +381,34 @@ export class DashboardServer {
           const result = this.onInventoryAction ? await this.onInventoryAction({ action, itemName, slot }) : null;
           this.broadcast();
           return this._sendJson(res, 200, { ok: true, action, itemName, result });
+        } catch (err) {
+          return this._sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+        }
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/macro') {
+        const auth = this._isAuthorizedPost(req, url);
+        if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
+        try {
+          if (this._isMcpRequest(req)) this.onMcpActivity?.();
+          const body = await this._readJsonBody(req);
+          const macro = String(body.macro ?? '').trim();
+          const wait = body.wait !== false;
+          if (!macro) {
+            return this._sendJson(res, 400, { ok: false, error: 'macro required' });
+          }
+          const result = this.onMacro
+            ? await this.onMacro({ macro, wait })
+            : { ok: false, status: 503, error: 'Macro runner chưa sẵn sàng' };
+          if (result?.ok === false && result?.status) {
+            return this._sendJson(res, result.status, {
+              ok: false,
+              error: result.error ?? 'Macro failed',
+              ...result,
+            });
+          }
+          this.broadcast();
+          return this._sendJson(res, 200, { ok: true, ...(result && typeof result === 'object' ? result : {}) });
         } catch (err) {
           return this._sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
         }

@@ -428,3 +428,61 @@ test('CraftManager._moveNextTo retries on GoalChanged when interrupted and waits
   assert.equal(res.name, 'wooden_pickaxe');
   assert.equal(gotoCalls, 2);
 });
+
+test('CraftManager reclaims temporary crafting_table when >24 blocks from home and keeps it near base', async () => {
+  const makeTableBot = (botPos) => {
+    const world = new Map();
+    world.set(`${botPos.x + 1},${botPos.y - 1},${botPos.z}`, { name: 'stone', position: new Vec3(botPos.x + 1, botPos.y - 1, botPos.z) });
+    const dug = [];
+    const counts = new Map([[5, 7], [280, 2], [58, 1]]);
+    const recipes = {
+      270: [{ result: { id: 270, count: 1 }, requiresTable: true, delta: [{ id: 5, count: -3 }, { id: 280, count: -2 }, { id: 270, count: 1 }] }],
+    };
+    const keyOf = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+    return {
+      dug,
+      bot: {
+        entity: { position: botPos },
+        registry: {
+          blocksByName: { crafting_table: { id: 58 } },
+          itemsByName: { oak_planks: { id: 5 }, stick: { id: 280 }, crafting_table: { id: 58 }, wooden_pickaxe: { id: 270 } },
+        },
+        inventory: {
+          count: (id) => counts.get(id) ?? 0,
+          items: () => [{ name: 'crafting_table', type: 58, count: counts.get(58) ?? 0 }].filter(i => i.count > 0),
+        },
+        findBlock: () => null,
+        blockAt: (p) => world.get(keyOf(p)) ?? { name: 'air', position: p },
+        equip: async () => {},
+        placeBlock: async (below, face) => {
+          const placedPos = below.position.offset(face.x, face.y, face.z);
+          world.set(keyOf(placedPos), { name: 'crafting_table', position: placedPos });
+          counts.set(58, 0);
+        },
+        dig: async (b) => {
+          dug.push(b.name);
+          world.delete(keyOf(b.position));
+        },
+        recipesAll: (id) => recipes[id] ?? [],
+        recipesFor: (id) => recipes[id] ?? [],
+        craft: async (recipe, times) => {
+          for (const d of recipe.delta) counts.set(d.id, (counts.get(d.id) ?? 0) + d.count * times);
+        },
+      },
+    };
+  };
+
+  const home = { get: () => ({ x: 0, y: 64, z: 0 }) };
+
+  // Far from home (50 blocks away) -> temporary crafting table is dug back up
+  const far = makeTableBot(new Vec3(50, 64, 0));
+  const craftFar = new CraftManager(far.bot, {}, { home });
+  await craftFar.craftItem('wooden_pickaxe', 1);
+  assert.deepEqual(far.dug, ['crafting_table']);
+
+  // Near base (10 blocks away) -> crafting table stays at base
+  const near = makeTableBot(new Vec3(10, 64, 0));
+  const craftNear = new CraftManager(near.bot, {}, { home });
+  await craftNear.craftItem('wooden_pickaxe', 1);
+  assert.deepEqual(near.dug, []);
+});

@@ -185,7 +185,8 @@ export function createChatHandler(ctx) {
     logFor(viaWhisper ? 'whisper' : 'chat')(`${username}: ${message}`);
     const myChatGen = ++state.chatGen;
 
-    const isMcpChatMode = Boolean(config.chat?.mcpChat && !fromApi);
+    const hasMcpLease = !fromApi && Date.now() < (state.mcpLeaseUntil || 0);
+    const isMcpChatMode = Boolean((config.chat?.mcpChat || hasMcpLease) && !fromApi);
     if (inboxEntry) {
       inboxEntry.parsedType = parsed.type;
       inboxEntry.handledByBot = parsed.type !== 'unknown'
@@ -312,6 +313,7 @@ export function createChatHandler(ctx) {
     await ctx.dispatchParsedCommand(parsed, username, reply, null, {
       userMessage: message,
       alreadyAcked: false,
+      fromApi,
     });
   }
 

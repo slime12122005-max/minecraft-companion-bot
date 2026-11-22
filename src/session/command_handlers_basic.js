@@ -1,6 +1,7 @@
 import pf from 'mineflayer-pathfinder';
 const { goals } = pf;
 import { Vec3 } from 'vec3';
+import { findSafeSleepBed, isSafeSleepDimension } from '../survival/index.js';
 
 const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest', 'barrel']);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -237,11 +238,13 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'sleep': {
-      const bed = bot.findBlock({
-        matching: block => block && bot.isABed(block),
-        maxDistance: 8,
-      });
-      if (!bed) { await say('Không thấy giường gần đây.', { kind: 'error' }); return true; }
+      if (!isSafeSleepDimension(bot.game?.dimension)) {
+        await say('Không được dùng giường ở Nether/End vì sẽ phát nổ!', { kind: 'error' });
+        return true;
+      }
+      const ownerEntity = bot.players?.[ctx.config?.owner]?.entity ?? null;
+      const bed = findSafeSleepBed(bot, ownerEntity, 8);
+      if (!bed) { await say('Không thấy giường trống gần đây.', { kind: 'error' }); return true; }
       await ctx.runStepTask({ name: 'ngu', reason: 'Lệnh đi ngủ' }, async (signal) => {
         if (bot.entity?.position && bed.position && bot.entity.position.distanceTo(bed.position) > 3.5) {
           await ctx.gotoSafe(new goals.GoalGetToBlock(bed.position.x, bed.position.y, bed.position.z), signal);
