@@ -251,6 +251,15 @@ export function bindSessionEvents(ctx) {
             await equipment.discardObsoleteItems();
           }
         }
+        ctx.humanizer?.updateIdleGaze?.(now, {
+          ownerEntity: bot.players?.[config.owner]?.entity ?? null,
+          busy: Boolean(tasks.active && !tasks.paused),
+          combatBusy: Boolean(combat.busy || combat.shieldActive || combat.bowCharging),
+          sleeping: Boolean(bot.isSleeping),
+          digging: Boolean(bot.targetDigBlock),
+          moving: Boolean(bot.pathfinder?.isMoving?.()),
+          windowOpen: Boolean(bot.currentWindow),
+        });
         for (const alert of survival.checkHealthAlerts({ ownerName: config.owner })) {
           bot.chat(alert);
         }
@@ -314,6 +323,7 @@ export function bindSessionEvents(ctx) {
     detach('error', onError);
     detach('kicked', onKicked);
     combat.stop();
+    ctx.humanizer?.dispose?.();
     ctx.stopCurrentTask('Ngắt kết nối', { clearQueue: true });
     if (!externalDashboard) {
       await dashboard.stop().catch(() => {});

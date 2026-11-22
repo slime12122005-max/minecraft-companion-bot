@@ -42,6 +42,18 @@
     "requireFood": true,
     "minFoodPoints": 20
   },
+  "humanizer": {
+    "enabled": true,
+    "smoothLook": true,
+    "idleGaze": true,
+    "socialGestures": true,
+    "chatTypingDelay": true,
+    "typingMsPerChar": 26,
+    "maxChatDelayMs": 1600,
+    "personalSpace": 3,
+    "combatStrafe": true,
+    "attackJitterMs": 55
+  },
   "dashboard": {
     "enabled": true,
     "host": "127.0.0.1",

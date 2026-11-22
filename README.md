@@ -6,8 +6,8 @@ Bot kết nối vào thế giới LAN/Server Minecraft Java 1.21.1 theo kiến t
   Nhận yêu cầu ngôn ngữ tự nhiên từ chủ nhân qua `mc_get_inbox`, lập kế hoạch, chia việc tuần tự bằng `mc_plan_execute` / `mc_run_macro` / `mc_command`, theo dõi tiến độ & cảnh báo qua `mc_wait_event`.
 - **Tầng 1 — Hỗ trợ phản ứng nhanh (System 1): Jev (`TYPESAFE_API_KEY`, `src/llm.js`)**
   Không dùng LLM chat hay đoán ý định nữa; Jev chỉ làm quyết định xác suất cực nhanh (`chooseCombat`, `chooseSurvivalAction`) khi bot gặp nguy hiểm, cần chọn chiến thuật chiến đấu hoặc hủy việc khẩn cấp.
-- **Tầng 0 — Phản xạ & Tay chân cục bộ (`src/commands.js`, `src/combat/`, `src/survival/`, `src/mining_farming.js`, `src/building/`, `src/smelting.js`, `src/swarm/`)**
-  Phản xạ tức thì lệnh chuẩn / khẩn cấp (`!stop`, `đứng đây`, `lại đây`), dập lửa/lava, giữ nhịp đánh 1.9+, né hất Creeper về phía chủ, chặt cây/đào hầm an toàn, nấu luyện bất đồng bộ, xây schematic và điều phối bầy đàn.
+- **Tầng 0 — Phản xạ & Tay chân cục bộ (`src/commands.js`, `src/humanizer.js`, `src/combat/`, `src/survival/`, `src/mining_farming.js`, `src/building/`, `src/smelting.js`, `src/swarm/`)**
+  Phản xạ tức thì lệnh chuẩn / khẩn cấp (`!stop`, `đứng đây`, `lại đây`), `MotorHumanizer` (xoay đầu mượt, ánh nhìn tự nhiên theo chủ, cử chỉ gật đầu/nháy Shift chào, độ trễ gõ chat, khoảng cách cá nhân 3 block, combat strafe + W-tap), dập lửa/lava, giữ nhịp đánh 1.9+, né hất Creeper về phía chủ, chặt cây/đào hầm an toàn, nấu luyện bất đồng bộ, xây schematic và điều phối bầy đàn.
 
 Yêu cầu **Node.js >= 22.5** (khuyến nghị Node 24 LTS, dùng built-in `node:sqlite`).
 

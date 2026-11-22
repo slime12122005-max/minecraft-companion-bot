@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Minecraft companion: LLM planner, Jev tactics, local reflexes",
+  "description": "Minecraft Java 1.21.1 companion bot: Antigravity MCP main brain, Jev fast support, MotorHumanizer, local reflexes",
   "scripts": {
     "start": "node src/index.js",
     "doctor": "node src/index.js --doctor",

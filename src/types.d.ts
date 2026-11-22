@@ -1,3 +1,16 @@
+export interface HumanizerConfig {
+  enabled?: boolean;
+  smoothLook?: boolean;
+  idleGaze?: boolean;
+  socialGestures?: boolean;
+  chatTypingDelay?: boolean;
+  typingMsPerChar?: number;
+  maxChatDelayMs?: number;
+  personalSpace?: number;
+  combatStrafe?: boolean;
+  attackJitterMs?: number;
+}
+
 export interface LLMConfig {
   provider?: string;
   model: string;
@@ -48,6 +61,7 @@ export interface BotConfig {
     requireFood?: boolean;
     minFoodPoints?: number;
   };
+  humanizer?: HumanizerConfig;
   dashboard?: {
     enabled: boolean;
     host: string;

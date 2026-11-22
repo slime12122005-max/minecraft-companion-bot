@@ -132,6 +132,17 @@ export function createChatHandler(ctx) {
     // Natural chat, greetings, and acknowledgements go straight to Antigravity (MCP System 2)
     if (!fromApi && !isDirectCommand) {
       pushChatHistory('user', message);
+      if (parsed.type === 'greet' || parsed.type === 'ack') {
+        const unsafeGesture = Boolean(ctx.combat?.busy || bot.isSleeping || ctx.survival?.busy);
+        ctx.humanizer?.expressGesture?.('crouch_greet', { unsafe: unsafeGesture }).catch(() => {});
+        const ownerPos = bot.players?.[config.owner]?.entity?.position;
+        if (!unsafeGesture && ownerPos) {
+          ctx.humanizer?.smoothLookAt?.(
+            { x: ownerPos.x, y: ownerPos.y + 1.62, z: ownerPos.z },
+            { steps: 3 }
+          ).catch(() => {});
+        }
+      }
       logFor('antigravity')(`Chuyển "${message}" (${parsed.type}) sang Antigravity MCP.`);
       return;
     }

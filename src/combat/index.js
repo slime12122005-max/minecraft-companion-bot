@@ -43,7 +43,7 @@ function hasInfinityEnchant(bow) {
 }
 
 export class CombatController {
-  constructor(bot, config = {}, { jev, equipment, log = () => {}, onBusyChange = null, isEating = null, bowChargeMs = 950, critJumpMs = 260 } = {}) {
+  constructor(bot, config = {}, { jev, equipment, humanizer = null, log = () => {}, onBusyChange = null, isEating = null, bowChargeMs = 950, critJumpMs = 260 } = {}) {
     this.bot = bot;
     this.config = {
       enabled: true,
@@ -61,6 +61,7 @@ export class CombatController {
     };
     this.jev = jev;
     this.equipment = equipment;
+    this.humanizer = humanizer;
     this.log = log;
     this.onBusyChange = onBusyChange;
     this.isEating = isEating;
@@ -131,6 +132,7 @@ export class CombatController {
       try { if (typeof this.bot.deactivateItem === 'function') this.bot.deactivateItem(); } catch {}
     }
     try { if (typeof this.bot.setControlState === 'function') this.bot.setControlState('jump', false); } catch {}
+    this.humanizer?.stopCombatMotion?.();
     this._releaseCombatGoal();
     this._setBusy(false);
   }

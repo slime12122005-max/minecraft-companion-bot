@@ -293,7 +293,7 @@ export function createDashboardBridge(ctx) {
     };
   }
 
-  async function onSay({ message, whisperTo = null } = {}) {
+  async function onSay({ message, whisperTo = null, instant = false } = {}) {
     const text = String(message ?? '').trim();
     if (!text) {
       return { ok: false, status: 400, error: 'message required' };
@@ -301,6 +301,13 @@ export function createDashboardBridge(ctx) {
     const canSend = !state.disconnected && (state.connected || Boolean(bot.entity));
     if (!canSend) {
       return { ok: false, status: 409, error: 'Bot chưa kết nối vào server' };
+    }
+    if (!instant && ctx.humanizer?.waitTypingDelay) {
+      await ctx.humanizer.waitTypingDelay(text, {
+        urgent: Boolean(combat?.busy),
+        ownerEntity: bot.players?.[config.owner]?.entity ?? null,
+        canMoveHead: !combat?.busy && !bot.targetDigBlock && !bot.currentWindow,
+      });
     }
     const target = whisperTo ? String(whisperTo).trim().slice(0, 16) : null;
     const chunks = splitChatChunks(text, 240);

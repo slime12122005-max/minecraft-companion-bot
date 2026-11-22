@@ -53,12 +53,14 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     case 'follow': {
       const player = bot.players[username]?.entity;
       if (!player) { await say('Tôi không thấy bạn.', { kind: 'error' }); return true; }
+      const followRange = Math.max(2, Math.min(6, Math.round(ctx.config?.humanizer?.personalSpace ?? 3)));
       const setFollowGoal = () => {
         const current = bot.players[username]?.entity;
         if (current && bot.pathfinder) {
-          bot.pathfinder.setGoal(new goals.GoalFollow(current, 2), true);
+          bot.pathfinder.setGoal(new goals.GoalFollow(current, followRange), true);
         }
       };
+      ctx.humanizer?.expressGesture?.('nod', { unsafe: Boolean(combat.busy || bot.isSleeping) }).catch(() => {});
       if (parentSignal) {
         setFollowGoal();
         await say('Được, tôi đi theo bạn.', { kind: 'final' });

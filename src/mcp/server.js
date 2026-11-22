@@ -118,6 +118,10 @@ export const TOOLS = [
           maxLength: 16,
           description: 'Tên người chơi nhận whisper (bỏ trống để chat công khai).',
         },
+        instant: {
+          type: 'boolean',
+          description: 'Bỏ qua mô phỏng độ trễ gõ phím cho câu cảnh báo khẩn cấp (mặc định false).',
+        },
       },
       required: ['message'],
       additionalProperties: false,
@@ -464,6 +468,9 @@ export function createMcpHandler({
         const body = { message };
         if (input.whisperTo != null && String(input.whisperTo).trim()) {
           body.whisperTo = String(input.whisperTo).trim();
+        }
+        if (input.instant != null) {
+          body.instant = Boolean(input.instant);
         }
         return await requestJson('/api/say', { method: 'POST', body });
       }

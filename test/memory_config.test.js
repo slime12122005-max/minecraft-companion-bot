@@ -49,6 +49,8 @@ test('DEFAULT_CONFIG uses Antigravity MCP as main brain, Jev typesafe for fast s
   assert.equal(DEFAULT_CONFIG.llm.apiKeyEnv, 'TYPESAFE_API_KEY');
   assert.equal(DEFAULT_CONFIG.chat, undefined);
   assert.equal(DEFAULT_CONFIG.dashboard.enabled, true);
+  assert.equal(DEFAULT_CONFIG.humanizer.enabled, true);
+  assert.equal(DEFAULT_CONFIG.humanizer.personalSpace, 3);
 });
 
 test('loadConfig ignores legacy chat fields cleanly while preserving core Jev and dashboard overrides', async () => {

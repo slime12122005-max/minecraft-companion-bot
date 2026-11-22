@@ -56,7 +56,11 @@ export async function face(ctx, entity) {
   if (!entity?.position) return;
   try {
     const look = entity.position.offset(0, entity.height ?? 1.62, 0);
-    if (typeof ctx.bot.lookAt === 'function') await ctx.bot.lookAt(look, false);
+    if (ctx.humanizer?.smoothLookAt) {
+      await ctx.humanizer.smoothLookAt(look, { steps: 3, jitterRad: 0.015 });
+    } else if (typeof ctx.bot.lookAt === 'function') {
+      await ctx.bot.lookAt(look, false);
+    }
   } catch {}
 }
 
@@ -87,7 +91,8 @@ export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1
   if (ctx.isEating?.()) return;
   const now = Date.now();
   const cooldownMs = getAttackCooldownMs(ctx.bot.heldItem);
-  if (now - ctx.lastAttackAt < cooldownMs) return;
+  const jitterMs = ctx.humanizer?.getAttackJitterMs?.() ?? 0;
+  if (now - ctx.lastAttackAt < cooldownMs + jitterMs) return;
   const opponentBlocking = Boolean(
     target?.blocking ||
     (typeof target?.metadata?.[8] === 'number' && (target.metadata[8] & 0x01) !== 0) ||
@@ -101,9 +106,12 @@ export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1
     }
     if (isFriendlyInCursor(ctx.bot, target, owner)) return;
     const finalCooldownMs = getAttackCooldownMs(ctx.bot.heldItem);
-    if (now - ctx.lastAttackAt < finalCooldownMs) return;
+    if (now - ctx.lastAttackAt < finalCooldownMs + jitterMs) return;
     ctx.lastAttackAt = now;
-    if (typeof ctx.bot.attack === 'function') await ctx.bot.attack(target);
+    if (typeof ctx.bot.attack === 'function') {
+      await ctx.bot.attack(target);
+      ctx.humanizer?.triggerWTap?.({ inWater: Boolean(ctx.bot.entity?.isInWater) });
+    }
   } catch {}
 }
 
@@ -137,7 +145,11 @@ export async function shootBow(ctx, target, bowArg = null) {
   const dist = ctx.bot.entity.position.distanceTo(pos);
   const aim = pos.offset(0, target.height ?? 1.62, 0).offset(0, dist * 0.06, 0);
   try {
-    if (typeof ctx.bot.lookAt === 'function') await ctx.bot.lookAt(aim, false);
+    if (ctx.humanizer?.smoothLookAt) {
+      await ctx.humanizer.smoothLookAt(aim, { steps: 3, jitterRad: 0.01 });
+    } else if (typeof ctx.bot.lookAt === 'function') {
+      await ctx.bot.lookAt(aim, false);
+    }
     if (typeof ctx.bot.activateItem === 'function') {
       ctx.bowCharging = true;
       ctx.bot.activateItem(false);
@@ -338,6 +350,27 @@ export async function applyDecision(ctx, decision, threat, owner) {
           }
           return;
         }
+      } else if (ctx.humanizer?.maybeCombatStrafe && ctx.bot.entity?.position) {
+        const bp = ctx.bot.entity.position;
+        const dx = target.position.x - bp.x;
+        const dz = target.position.z - bp.z;
+        const len = Math.hypot(dx, dz) || 1;
+        const rx = -dz / len;
+        const rz = dx / len;
+        const safeRight = typeof bp.offset === 'function'
+          ? ctx._isSafeEscapeSpot(bp.offset(rx * 1.8, 0, rz * 1.8))
+          : false;
+        const safeLeft = typeof bp.offset === 'function'
+          ? ctx._isSafeEscapeSpot(bp.offset(-rx * 1.8, 0, -rz * 1.8))
+          : false;
+        ctx.humanizer.maybeCombatStrafe({
+          distance,
+          inWater: Boolean(ctx.bot.entity?.isInWater),
+          isCreeper: false,
+          onGround: Boolean(ctx.bot.entity?.onGround),
+          safeLeft,
+          safeRight,
+        });
       }
       ctx._lowerShield();
       const allowCrit = ctx.config.crit && !ctx.bot.entity?.isInWater;

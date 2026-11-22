@@ -14,6 +14,7 @@ import { CraftManager } from '../crafting.js';
 import { SmeltingManager } from '../smelting.js';
 import { MacroRunner, createSessionMacroHandlers } from '../skills/macro_runner.js';
 import { MiningFarmingManager } from '../mining_farming.js';
+import { MotorHumanizer } from '../humanizer.js';
 import { DashboardServer } from '../dashboard.js';
 import { BotStateMachine } from './state_machine.js';
 import { HealthWatchdog } from './health_watchdog.js';
@@ -80,6 +81,19 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     isInterrupted: isWorkInterrupted,
   });
 
+  const humanizerOverrides = (loadPlugins === false && !config.humanizer?.preserveTestDelays)
+    ? {
+        lookStepMs: 0,
+        gestureStepMs: 0,
+        typingBaseMs: 0,
+        typingMsPerChar: 0,
+        maxChatDelayMs: 0,
+        attackJitterMs: 0,
+        strafeDurationMs: 0,
+      }
+    : {};
+  const humanizer = new MotorHumanizer(bot, config, { overrides: humanizerOverrides });
+
   const combat = new CombatController(bot, config, {
     jev: (llm?.isAvailable?.() || llm?.apiKey) ? {
       chooseCombat: async (jevState) => {
@@ -103,6 +117,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
       },
     } : null,
     equipment,
+    humanizer,
     isEating: () => survival.eating,
     onBusyChange: ({ busy }) => {
       if (busy) {
@@ -151,6 +166,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     survival,
     mining,
     combat,
+    humanizer,
     builder,
     macros: null,
     stateMachine,
@@ -220,6 +236,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     cleanup,
     survival,
     combat,
+    humanizer,
     equipment,
     home,
     builder,

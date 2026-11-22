@@ -327,8 +327,9 @@ export class DashboardServer {
           if (!message) return this._sendJson(res, 400, { ok: false, error: 'message required' });
           const rawWhisper = body.whisperTo != null ? String(body.whisperTo).trim().slice(0, 16) : '';
           const whisperTo = rawWhisper || null;
+          const instant = Boolean(body.instant);
           const result = this.onSay
-            ? await this.onSay({ message, whisperTo })
+            ? await this.onSay({ message, whisperTo, instant })
             : { ok: false, error: 'Bot chưa sẵn sàng' };
           if (result?.ok === false) {
             return this._sendJson(res, result.status ?? 409, {
