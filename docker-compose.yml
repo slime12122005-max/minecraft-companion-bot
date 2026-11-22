@@ -1,0 +1,15 @@
+services:
+  minecraft-bot:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      DASHBOARD_ENABLED: "true"
+      DASHBOARD_HOST: "0.0.0.0"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro

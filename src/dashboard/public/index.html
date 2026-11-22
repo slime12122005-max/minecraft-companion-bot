@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bot Đồng Hành Minecraft — Realtime Dashboard</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="title-group">
+      <h1>🤖 Bot Đồng Hành Minecraft</h1>
+      <div class="pill-row">
+        <span id="connStatus" class="pill">...</span>
+        <span id="fsmState" class="pill">IDLE</span>
+        <span id="task" class="pill">rảnh</span>
+        <span id="worldClock" class="pill">🕒 --</span>
+        <span id="xpLevel" class="pill">XP Lv 0</span>
+        <span id="threatBadge" class="pill">An toàn</span>
+        <span id="sseStatus" class="pill pill-muted">SSE...</span>
+      </div>
+    </div>
+    <div class="emergency-bar" role="group" aria-label="Điều khiển khẩn cấp">
+      <button type="button" id="btnToggleAi" class="btn-warn" aria-pressed="false">⏸ Tạm dừng AI</button>
+      <button type="button" id="btnRecallHome" class="btn-secondary">🏠 Về nhà khẩn</button>
+      <button type="button" id="btnDisconnect" class="btn-danger">🔌 Ngắt an toàn</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="actionStatus" role="status" aria-live="polite" class="status-banner">Sẵn sàng nhận lệnh.</div>
+
+    <section class="forms-panel" aria-label="Kết nối và gửi lệnh">
+      <form class="row" id="lanForm">
+        <div class="field field-sm">
+          <label for="lanHost" class="visually-hidden">Host máy chủ</label>
+          <input id="lanHost" placeholder="Host (localhost)" autocomplete="off" />
+        </div>
+        <div class="field field-sm">
+          <label for="lanPort" class="visually-hidden">Cổng LAN</label>
+          <input id="lanPort" type="number" min="1" max="65535" placeholder="Cổng LAN (vd: 55916)" />
+        </div>
+        <div class="field field-sm">
+          <label for="lanOwner" class="visually-hidden">Tên chủ nhân</label>
+          <input id="lanOwner" placeholder="Tên chủ nhân (vd: araslime)" autocomplete="off" />
+        </div>
+        <button type="submit">Kết nối / Đổi cổng LAN</button>
+      </form>
+
+      <form class="row" id="cmdForm">
+        <div class="field field-grow">
+          <label for="cmdInput" class="visually-hidden">Lệnh điều khiển bot</label>
+          <input id="cmdInput" placeholder="Nhập lệnh (vd: theo tôi, chế tạo cuốc sắt, làm ruộng, đào hầm 12)..." autocomplete="off" />
+        </div>
+        <button type="submit">Gửi lệnh</button>
+      </form>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Sinh tồn &amp; Watchdog</h2>
+        <div class="stat"><label for="hpBar">Máu</label><strong id="hp">-/20</strong></div>
+        <progress id="hpBar" class="progress-danger" max="20" value="0"></progress>
+
+        <div class="stat"><label for="foodBar">Đói</label><strong id="food">-/20</strong></div>
+        <progress id="foodBar" class="progress-accent" max="20" value="0"></progress>
+
+        <div class="stat"><span>Vị trí</span><span id="pos">-</span></div>
+        <div class="stat"><span>Giảm sát thương giáp</span><strong id="armorMit">0%</strong></div>
+        <div class="stat"><span>Watchdog</span><span id="watchdogInfo">-</span></div>
+        <h3>Cảnh báo độ bền (&lt;10%)</h3>
+        <div id="lowDurAlerts" class="pill-wrap"><span class="muted">Độ bền ổn định</span></div>
+      </section>
+
+      <section class="card">
+        <h2>Radar không gian 2D</h2>
+        <figure class="radar-figure">
+          <canvas id="radarCanvas" width="320" height="320"></canvas>
+          <figcaption id="radarCaption" class="muted">Đang chờ tọa độ thế giới...</figcaption>
+        </figure>
+        <div class="radar-legend" aria-hidden="true">
+          <span class="dot dot-bot">Bot</span>
+          <span class="dot dot-home">Nhà</span>
+          <span class="dot dot-chest">Rương</span>
+          <span class="dot dot-waypoint">Điểm</span>
+          <span class="dot dot-ore">Quặng</span>
+          <span class="dot dot-danger">Nguy hiểm</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Trang bị &amp; Túi đồ</h2>
+        <div id="eqGrid" class="eq-grid"></div>
+        <h3>Túi đồ (nhấn Trang bị / Vứt)</h3>
+        <div id="inv" class="inv-list"></div>
+        <h3>Rương đã nhớ</h3>
+        <div id="chests" class="pill-wrap"></div>
+      </section>
+
+      <section class="card">
+        <h2>Hàng đợi &amp; Hệ thống AI</h2>
+        <div id="taskQueue" class="subpanel"></div>
+        <h3>Hệ thống AI (System 1 &amp; System 2)</h3>
+        <div id="brains"></div>
+        <div id="aiStats" class="muted small-note"></div>
+        <h3>Jev System-1 Telemetry</h3>
+        <div id="jev">Chưa có dữ liệu Jev</div>
+        <h3>Đánh giá đe dọa (Threat Score)</h3>
+        <div id="threatDetails" class="muted">Không có đe dọa gần</div>
+      </section>
+
+      <section class="card card-wide">
+        <h2>Log trực tiếp</h2>
+        <pre id="logs"></pre>
+      </section>
+    </div>
+  </main>
+
+  <script>
+  function esc(v) {
+    return String(v ?? '').replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+  }
+  </script>
+  <script src="/app.js"></script>
+</body>
+</html>

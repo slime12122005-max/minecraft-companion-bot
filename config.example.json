@@ -1,0 +1,60 @@
+{
+  "minecraft": {
+    "host": "localhost",
+    "port": 55916,
+    "username": "bot_dong_hanh",
+    "version": "1.21.1"
+  },
+  "owner": "araslime",
+  "llm": {
+    "provider": "typesafe",
+    "model": "jev-latest",
+    "baseUrl": "https://api.typesafe.ai",
+    "apiKeyEnv": "TYPESAFE_API_KEY",
+    "jevIntervalMs": 2000
+  },
+  "chat": {
+    "enabled": true,
+    "humanReply": true,
+    "mcpChat": false,
+    "provider": "crowllm",
+    "model": "particle-1:free",
+    "fallbackModels": ["grok-4.7-fast:free"],
+    "baseUrl": "https://crowllm.com/v1",
+    "apiKeyEnv": "CROWLLM_API_KEY"
+  },
+  "combat": {
+    "enabled": true,
+    "defendOwner": true,
+    "radius": 16,
+    "retreatHealth": 8,
+    "crit": true,
+    "bow": true,
+    "shieldAgainstCreeper": true,
+    "useCausality": true
+  },
+  "inventory": {
+    "blockStacks": 1,
+    "keepFood": 16,
+    "discardObsolete": false
+  },
+  "building": {
+    "confirmTerrainChange": true,
+    "maxBlocksPerSession": 5000,
+    "keepWater": false
+  },
+  "home": {
+    "setOnCommand": true,
+    "autoReturn": true,
+    "storageChest": null
+  },
+  "survival": {
+    "requireFood": true,
+    "minFoodPoints": 20
+  },
+  "dashboard": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 3000
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "ban-dong-hanh-minecraft",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minecraft companion: LLM planner, Jev tactics, local reflexes",
+  "scripts": {
+    "start": "node src/index.js",
+    "doctor": "node src/index.js --doctor",
+    "mcp": "node src/mcp/server.js",
+    "test": "node --test",
+    "check": "node scripts/check.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10",
+    "mineflayer": "^4.39.0",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "mineflayer-tool": "^1.2.0",
+    "prismarine-nbt": "^2.8.0",
+    "prismarine-schematic": "^1.3.0",
+    "vec3": "^0.2.0",
+    "zod": "^4.6.7"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+.pnpm-store/
+.env
+config.json
+data/
+*.log
+data/*.log
+data/*.db
+data/*.db-wal
+data/*.db-shm
+coverage/
+.DS_Store
