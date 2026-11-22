@@ -42,22 +42,9 @@ function loadDshCredentials() {
 
 loadDshCredentials();
 
-const DEFAULT_API_KEY_ENVS = {
-  typesafe: 'TYPESAFE_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-  openrouter: 'OPENROUTER_API_KEY',
-  crowllm: 'CROWLLM_API_KEY',
-  chatfree: 'CHATFREE_API_KEY',
-};
-
 export function resolveApiKeyEnv(llmCfg = {}) {
-  const provider = String(llmCfg.provider || 'typesafe').toLowerCase();
-  if (llmCfg.apiKeyEnv && (provider === 'typesafe' || llmCfg.apiKeyEnv !== 'TYPESAFE_API_KEY')) {
-    return llmCfg.apiKeyEnv;
-  }
-  return DEFAULT_API_KEY_ENVS[provider] ?? llmCfg.apiKeyEnv ?? 'TYPESAFE_API_KEY';
+  const custom = String(llmCfg?.apiKeyEnv || '').trim();
+  return custom || 'TYPESAFE_API_KEY';
 }
 
 async function runDoctor() {
@@ -88,33 +75,16 @@ async function runDoctor() {
   }
 
   const apiKeyEnv = resolveApiKeyEnv(config?.llm);
-  if (apiKeyEnv) {
-    if (process.env[apiKeyEnv]) {
-      console.log(`OK: System 1 (Jev xác suất) - ${config.llm.model} (${apiKeyEnv} OK)`);
-    } else {
-      console.log(`WARN: System 1 (Jev xác suất) - chưa đặt ${apiKeyEnv} (bot dùng phản xạ chiến đấu cục bộ)`);
-    }
-  }
-
-  if (config?.chat?.enabled !== false && config?.chat) {
-    const chatProvider = String(config.chat.provider || 'crowllm').toLowerCase();
-    const chatKeyEnv = resolveApiKeyEnv(config.chat);
-    const fallbacks = Array.isArray(config.chat.fallbackModels) && config.chat.fallbackModels.length > 0
-      ? ` (fallback: ${config.chat.fallbackModels.join(', ')})`
-      : '';
-    if (chatProvider === 'ollama') {
-      console.log(`OK: System 2 (Chat ngôn ngữ tự nhiên) - ollama/${config.chat.model}${fallbacks} (local)`);
-    } else if (chatKeyEnv && process.env[chatKeyEnv]) {
-      console.log(`OK: System 2 (Chat ngôn ngữ tự nhiên) - ${chatProvider}/${config.chat.model}${fallbacks} (${chatKeyEnv} OK)`);
-    } else {
-      console.log(`INFO: System 2 (Chat ngôn ngữ tự nhiên) - chưa đặt ${chatKeyEnv ?? 'API key'} (đang dùng lệnh chuẩn + fallback Jev)`);
-    }
-  } else if (config?.chat) {
-    console.log('INFO: System 2 (Chat ngôn ngữ tự nhiên) - đã tắt (chat.enabled=false; dùng lệnh chuẩn / Antigravity MCP)');
+  if (process.env[apiKeyEnv]) {
+    console.log(`OK: System 1 (Jev hỗ trợ phản ứng nhanh) - ${config.llm.model} (${apiKeyEnv} OK)`);
+  } else {
+    console.log(`WARN: System 1 (Jev hỗ trợ phản ứng nhanh) - chưa đặt ${apiKeyEnv} (dùng phản xạ cục bộ)`);
   }
 
   if (config?.dashboard?.enabled) {
-    console.log(`OK: Dashboard/MCP API - http://${config.dashboard.host}:${config.dashboard.port}`);
+    console.log(`OK: System 2 (Não chính Antigravity MCP) - http://${config.dashboard.host}:${config.dashboard.port}`);
+  } else {
+    console.log('WARN: System 2 (Não chính Antigravity MCP) - dashboard.enabled=false (MCP không kết nối được)');
   }
 
   process.exit(ok ? 0 : 1);
@@ -172,24 +142,11 @@ async function main() {
   const apiKeyEnv = resolveApiKeyEnv(config.llm);
   const apiKey = apiKeyEnv ? process.env[apiKeyEnv] : undefined;
   const llm = new LLMClient({
-    provider: config.llm.provider,
     model: config.llm.model,
-    fallbackModels: config.llm.fallbackModels,
     baseUrl: config.llm.baseUrl,
     apiKey,
-  });
-
-  const chatCfg = config.chat ?? {};
-  const chatProvider = String(chatCfg.provider || 'crowllm').toLowerCase();
-  const chatKeyEnv = chatProvider === 'ollama' ? null : resolveApiKeyEnv(chatCfg);
-  const chatApiKey = chatKeyEnv ? process.env[chatKeyEnv] : undefined;
-  const chatLlm = chatCfg.enabled === false ? null : new LLMClient({
-    provider: chatCfg.provider,
-    model: chatCfg.model,
-    fallbackModels: chatCfg.fallbackModels,
-    baseUrl: chatCfg.baseUrl,
-    apiKey: chatApiKey,
-    maxRequestsPerMin: chatCfg.maxRequestsPerMin,
+    timeoutMs: config.llm.timeoutMs,
+    maxRequestsPerMin: config.llm.maxRequestsPerMin,
   });
 
   const memory = new Memory({ dbPath: 'data/bot_memory.db', legacyJsonPath: 'data/memory.json' });
@@ -319,7 +276,6 @@ async function main() {
     logger.write('INFO', 'bot', `🔌 Đang kết nối tới ${config.minecraft.host}:${config.minecraft.port}...`);
     const session = createBotSession(config, {
       llm,
-      chatLlm,
       memory,
       tasks,
       router,

@@ -1,7 +1,6 @@
 import { getDurabilityRatio } from '../equipment.js';
 import { BUILTIN_MACROS } from '../skills/macro_runner.js';
 
-const MCP_LEASE_MS = 90_000;
 const NOTABLE_STATION_BLOCKS = new Set([
   'ancient_debris',
   'crafting_table',
@@ -63,7 +62,6 @@ export function createDashboardBridge(ctx) {
     bot,
     config,
     llm,
-    chatLlm,
     memory,
     tasks,
     equipment,
@@ -80,13 +78,12 @@ export function createDashboardBridge(ctx) {
     const slots = bot.inventory?.slots ?? [];
     const timeOfDay = bot.time?.timeOfDay ?? null;
     const isDay = bot.time?.isDay ?? (timeOfDay != null ? timeOfDay < 12000 : null);
+    const jevAvailable = Boolean(llm?.isAvailable?.() || llm?.apiKey);
 
     return {
       username: bot.username,
       connected: state.connected,
       aiPaused: Boolean(state.aiPaused),
-      mcpLeaseActive: Date.now() < (state.mcpLeaseUntil || 0),
-      mcpLeaseUntil: state.mcpLeaseUntil || 0,
       state: stateMachine.snapshot().state,
       watchdog: watchdog.status(),
       lan: {
@@ -129,13 +126,15 @@ export function createDashboardBridge(ctx) {
       })),
       chests: home.listChestInventory(),
       pois: typeof memory?.queryPois === 'function' ? memory.queryPois({ limit: 40 }) : [],
+      smeltingJobs: Object.fromEntries(ctx.smelting?.activeJobs ?? []),
+      activePlan: state.activePlan ?? null,
       brains: {
-        system1: llm?.apiKey ? `${llm.provider ?? 'typesafe'}/${llm.model ?? 'jev-latest'}` : 'local-reflex',
-        system2: (config.chat?.enabled !== false && chatLlm?.isAvailable?.())
-          ? `${chatLlm.provider ?? 'crowllm'}/${chatLlm.model ?? ''}${chatLlm.fallbackModels?.length ? ` (+${chatLlm.fallbackModels.join(', ')})` : ''}`
-          : 'off (fallback System 1)',
+        planner: 'Antigravity (MCP)',
+        tacticalSupport: jevAvailable ? `Jev (${llm.model ?? 'jev-latest'})` : 'Local Reflex',
+        system1: jevAvailable ? `jev/${llm.model ?? 'jev-latest'}` : 'local-reflex',
+        system2: 'antigravity-mcp',
       },
-      aiStats: typeof chatLlm?.stats === 'function' ? chatLlm.stats() : null,
+      aiStats: typeof llm?.stats === 'function' ? llm.stats() : null,
       jev: combat.lastJevTelemetry,
       threat: combat.lastThreatAssessment ?? null,
       logs: logger ? logger.recent(40) : [],
@@ -294,13 +293,6 @@ export function createDashboardBridge(ctx) {
     };
   }
 
-  function touchMcpLease(ttlMs = MCP_LEASE_MS) {
-    const dur = Math.max(1000, Number(ttlMs) || MCP_LEASE_MS);
-    const next = Date.now() + dur;
-    state.mcpLeaseUntil = Math.max(state.mcpLeaseUntil || 0, next);
-    return state.mcpLeaseUntil;
-  }
-
   async function onSay({ message, whisperTo = null } = {}) {
     const text = String(message ?? '').trim();
     if (!text) {
@@ -418,5 +410,151 @@ export function createDashboardBridge(ctx) {
     return { ok: Boolean(res?.ok), macro: name, ...res };
   }
 
-  return { getDashboardState, onCommand, onControl, onInventoryAction, getNearby, getInbox, onSay, onMacro, touchMcpLease };
+  async function onPlanExecute({ goal = '', steps = [], onDanger = 'pause_and_resume', wait = true } = {}) {
+    if (!Array.isArray(steps) || steps.length === 0 || steps.length > 10) {
+      return { ok: false, status: 400, error: 'steps must be an array with 1..10 items' };
+    }
+    const validTypes = new Set(['command', 'macro', 'smelt', 'say']);
+    for (const s of steps) {
+      if (!s || typeof s !== 'object' || !validTypes.has(s.type)) {
+        return { ok: false, status: 400, error: `Invalid plan step type: ${s?.type ?? 'unknown'}` };
+      }
+    }
+
+    state.planSeq = (state.planSeq || 0) + 1;
+    const planId = `plan_${state.planSeq}`;
+    const cleanGoal = String(goal ?? '').trim();
+    const dangerMode = onDanger === 'abort_and_notify' ? 'abort_and_notify' : 'pause_and_resume';
+
+    ctx.stopCurrentTask?.(`Kế hoạch Antigravity: ${cleanGoal || planId}`);
+    const run = tasks.run(
+      { name: `plan_${planId}`, reason: cleanGoal || 'Kế hoạch Antigravity' },
+      async (signal) => {
+        const completedSteps = [];
+        state.activePlan = {
+          id: planId,
+          goal: cleanGoal,
+          totalSteps: steps.length,
+          currentStep: 0,
+          status: 'running',
+          startedAt: Date.now(),
+        };
+        try {
+          for (let i = 0; i < steps.length; i++) {
+            if (signal.aborted) {
+              const abortedRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: 'ABORTED', completedSteps };
+              ctx.pushInbox?.({ kind: 'plan_failed', role: 'SYSTEM', username: bot.username, message: `Kế hoạch ${planId} bị hủy`, ...abortedRes });
+              return abortedRes;
+            }
+            if (dangerMode === 'abort_and_notify' && combat.busy && (bot.health ?? 20) <= 10) {
+              const dangerRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: 'DANGER_ABORT', completedSteps };
+              ctx.pushInbox?.({ kind: 'alert', role: 'SYSTEM', severity: 'critical', username: bot.username, message: `Dừng kế hoạch ${planId} vì nguy hiểm (máu ${Math.round(bot.health ?? 20)}/20)`, planId });
+              ctx.pushInbox?.({ kind: 'plan_failed', role: 'SYSTEM', username: bot.username, message: `Kế hoạch ${planId} dừng vì nguy hiểm`, ...dangerRes });
+              return dangerRes;
+            }
+
+            state.activePlan.currentStep = i + 1;
+            const step = steps[i];
+
+            if (step.type === 'command') {
+              const cmdText = String(step.command ?? '').trim();
+              if (!cmdText) {
+                const badRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: 'EMPTY_COMMAND', completedSteps };
+                ctx.pushInbox?.({ kind: 'plan_failed', role: 'SYSTEM', username: bot.username, message: `Kế hoạch ${planId} lỗi bước #${i}: lệnh rỗng`, ...badRes });
+                return badRes;
+              }
+              const parsed = ctx.router?.parseChain ? ctx.router.parseChain(cmdText) : ctx.router?.parse?.(cmdText);
+              if (!parsed || parsed.type === 'unknown') {
+                const badRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: `UNKNOWN_COMMAND: ${cmdText}`, completedSteps };
+                ctx.pushInbox?.({ kind: 'plan_failed', role: 'SYSTEM', username: bot.username, message: `Kế hoạch ${planId} không hiểu lệnh "${cmdText}"`, ...badRes });
+                return badRes;
+              }
+              const notes = [];
+              await ctx.dispatchParsedCommand(parsed, config.owner, (t) => notes.push(t), signal, {
+                userMessage: cmdText,
+                fromApi: true,
+                suppressStart: true,
+                onOutcome: (t) => notes.push(t),
+              });
+              completedSteps.push({ step: i, type: 'command', command: cmdText, notes });
+            } else if (step.type === 'macro') {
+              const macroRes = await ctx.macros?.run?.(step.macro, signal);
+              if (!macroRes?.ok) {
+                const failRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: macroRes?.reason || macroRes?.error || 'MACRO_FAILED', completedSteps };
+                ctx.pushInbox?.({ kind: 'plan_failed', role: 'SYSTEM', username: bot.username, message: `Kế hoạch ${planId} dừng ở macro ${step.macro}: ${failRes.reason}`, ...failRes });
+                return failRes;
+              }
+              completedSteps.push({ step: i, type: 'macro', macro: step.macro, detail: macroRes });
+            } else if (step.type === 'smelt') {
+              if (!ctx.smelting) {
+                const failRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: 'SMELTING_UNAVAILABLE', completedSteps };
+                ctx.pushInbox?.({ kind: 'plan_failed', role: 'SYSTEM', username: bot.username, message: `Kế hoạch ${planId} thiếu SmeltingManager`, ...failRes });
+                return failRes;
+              }
+              const smeltRes = step.action === 'collect'
+                ? await ctx.smelting.collectReadyOutputs(signal, { force: Boolean(step.force) })
+                : await ctx.smelting.startSmelting(step.target, step.count ?? 1, signal);
+              if (smeltRes?.ok === false) {
+                const failRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: smeltRes.reason || 'SMELT_FAILED', completedSteps };
+                ctx.pushInbox?.({ kind: 'plan_failed', role: 'SYSTEM', username: bot.username, message: `Kế hoạch ${planId} lỗi nung: ${failRes.reason}`, ...failRes });
+                return failRes;
+              }
+              completedSteps.push({ step: i, type: 'smelt', action: step.action || 'start', detail: smeltRes });
+            } else if (step.type === 'say') {
+              const sayRes = await onSay({ message: step.message, whisperTo: step.whisperTo ?? null });
+              completedSteps.push({ step: i, type: 'say', detail: sayRes });
+            }
+          }
+
+          const doneRes = { ok: true, planId, goal: cleanGoal, completedSteps };
+          ctx.pushInbox?.({
+            kind: 'plan_completed',
+            role: 'SYSTEM',
+            username: bot.username,
+            message: `Hoàn thành kế hoạch ${planId}${cleanGoal ? `: ${cleanGoal}` : ''}`,
+            ...doneRes,
+          });
+          return doneRes;
+        } finally {
+          state.activePlan = null;
+        }
+      },
+      { onAbort: () => bot.pathfinder?.setGoal?.(null) }
+    );
+
+    if (!run) {
+      return { ok: false, status: 409, error: 'Không thể chạy kế hoạch vì tác vụ hiện tại đang bận' };
+    }
+    if (wait === false) {
+      run.promise.catch(() => {});
+      return { ok: true, status: 'ACCEPTED', planId, goal: cleanGoal, totalSteps: steps.length };
+    }
+    return await run.promise;
+  }
+
+  async function onSmelt({ action = 'status', target = '', count = 1, force = false } = {}) {
+    if (!ctx.smelting) {
+      return { ok: false, status: 503, error: 'Smelting manager chưa sẵn sàng' };
+    }
+    const act = String(action || 'status').trim();
+    if (act === 'status') {
+      const jobs = [...ctx.smelting.activeJobs.entries()].map(([posKey, job]) => ({ posKey, ...job }));
+      return { ok: true, action: 'status', jobs };
+    }
+    if (act === 'collect') {
+      const res = await ctx.smelting.collectReadyOutputs(null, { force: Boolean(force) });
+      return { ok: true, action: 'collect', ...res };
+    }
+    if (act === 'start') {
+      const cleanTarget = String(target ?? '').trim();
+      if (!cleanTarget) {
+        return { ok: false, status: 400, error: 'target required for smelt start' };
+      }
+      const res = await ctx.smelting.startSmelting(cleanTarget, Math.max(1, Number(count) || 1));
+      return { ok: Boolean(res?.ok), action: 'start', ...res };
+    }
+    return { ok: false, status: 400, error: `Invalid smelt action: ${act}` };
+  }
+
+  return { getDashboardState, onCommand, onControl, onInventoryAction, getNearby, getInbox, onSay, onMacro, onPlanExecute, onSmelt };
 }

@@ -23,7 +23,7 @@ import { createChatHandler } from './chat_handler.js';
 import { bindSessionEvents } from './event_dispatcher.js';
 import { createDashboardBridge } from './dashboard_bridge.js';
 
-export function createBotSession(config, { llm, chatLlm = null, memory, tasks, router, logger = null, createBotFn = createBot, loadPlugins = true, onConnect = null, externalDashboard = null, inboxState = null } = {}) {
+export function createBotSession(config, { llm, memory, tasks, router, logger = null, createBotFn = createBot, loadPlugins = true, onConnect = null, externalDashboard = null, inboxState = null } = {}) {
   const logFor = (tag) => (logger ? logger.scoped(tag) : (...a) => console.log(`[${tag}]`, ...a));
   const warnFor = (tag, ...a) => (logger ? logger.warn(tag, ...a) : console.warn(`[${tag}]`, ...a));
   const errorFor = (tag, ...a) => (logger ? logger.error(tag, ...a) : console.error(`[${tag}]`, ...a));
@@ -45,7 +45,8 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     connected: false,
     disconnected: false,
     aiPaused: false,
-    mcpLeaseUntil: 0,
+    activePlan: null,
+    planSeq: 0,
     lastCombatEndedAt: 0,
     pendingBuild: null,
     pendingAction: null,
@@ -80,50 +81,20 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
   });
 
   const combat = new CombatController(bot, config, {
-    jev: llm?.apiKey ? {
+    jev: (llm?.isAvailable?.() || llm?.apiKey) ? {
       chooseCombat: async (jevState) => {
-        const questions = {
-          tactic: {
-            type: 'choice',
-            instructions: 'Chọn chiến thuật combat phù hợp nhất hiện tại.',
-            criteria: {
-              melee: 'Tấn công cận chiến bằng kiếm/rìu khi ở gần và an toàn.',
-              shield: 'Giơ khiên chặn nguy hiểm, đặc biệt creeper ở gần (< 4 block) hoặc bị bắn xa.',
-              bow: 'Bắn cung từ khoảng cách xa (> 4 block) khi có cung và tên.',
-              retreat: 'Rút lui khi máu thấp hoặc bị đông quái bao vây.',
-              idle: 'Không hành động, quan sát.',
-            },
-          },
-          focus: {
-            type: 'choice',
-            instructions: 'Nên ưu tiên xử lý mối đe dọa nào trước?',
-            criteria: {
-              creeper: 'Creeper ở gần sắp nổ.',
-              ranged: 'Quái bắn xa như skeleton, pillager, blaze.',
-              hurting_owner: 'Quái đang đứng gần hoặc tấn công chủ nhân.',
-              closest: 'Quái đứng gần bot nhất.',
-            },
-          },
-          danger: {
-            type: 'score',
-            instructions: 'Đánh giá mức độ nguy hiểm hiện tại của bot.',
-            criteria: ['low', 'medium', 'high', 'critical'],
-          },
-          urgentRetreat: {
-            type: 'noul',
-            instructions: 'Tình huống có quá nguy hiểm đến mức phải rút lui ngay lập tức không?',
-            criteria: { true: 'Rất nguy hiểm, cần rút lui.', false: 'Vẫn kiểm soát được.' },
-          },
-        };
         try {
-          const res = await llm.ask({ state: jevState, questions });
+          if (typeof llm.chooseCombat === 'function') {
+            return await llm.chooseCombat(jevState);
+          }
+          const res = await llm.ask({ state: jevState, questions: {} });
           return {
-            action: res.answers?.tactic?.choice ?? 'melee',
-            confidence: res.answers?.tactic?.confidence ?? null,
-            probabilities: res.answers?.tactic?.probabilities ?? null,
-            focus: res.answers?.focus?.choice ?? null,
-            danger: res.answers?.danger?.score ?? null,
-            urgentRetreat: res.answers?.urgentRetreat?.noul ?? null,
+            action: res?.answers?.tactic?.choice ?? 'melee',
+            confidence: res?.answers?.tactic?.confidence ?? null,
+            probabilities: res?.answers?.tactic?.probabilities ?? null,
+            focus: res?.answers?.focus?.choice ?? null,
+            danger: res?.answers?.danger?.score ?? null,
+            urgentRetreat: res?.answers?.urgentRetreat?.noul ?? null,
           };
         } catch (err) {
           errorFor('jev', err.message);
@@ -169,7 +140,6 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     bot,
     config,
     llm,
-    chatLlm,
     memory,
     tasks,
     router,
@@ -222,7 +192,8 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     getInbox: bridge.getInbox,
     onSay: bridge.onSay,
     onMacro: bridge.onMacro,
-    onMcpActivity: bridge.touchMcpLease,
+    onPlanExecute: bridge.onPlanExecute,
+    onSmelt: bridge.onSmelt,
   });
   ctx.dashboard = dashboard;
 
@@ -235,7 +206,8 @@ export function createBotSession(config, { llm, chatLlm = null, memory, tasks, r
     externalDashboard.getInbox = bridge.getInbox;
     externalDashboard.onSay = bridge.onSay;
     externalDashboard.onMacro = bridge.onMacro;
-    externalDashboard.onMcpActivity = bridge.touchMcpLease;
+    externalDashboard.onPlanExecute = bridge.onPlanExecute;
+    externalDashboard.onSmelt = bridge.onSmelt;
     if (onConnect) externalDashboard.onConnect = onConnect;
   } else if (config.dashboard?.enabled && loadPlugins !== false) {
     dashboard.start().catch(err => errorFor('web', err.message));

@@ -372,11 +372,13 @@ test('session aborts gather cleanly via stop/stay and handles missing chest/bed 
   }
 });
 
-test('session routes unknown natural chat through Jev intent classifier and supports remote storageChest', async () => {
+test('session defers unknown natural chat to Antigravity inbox while executing direct commands and remote storageChest', async () => {
   const fakeBot = makeFakeBot();
   const memory = new Memory({ autoSaveMs: 0 });
   const tossed = [];
   const deposited = [];
+  const inboxState = { seq: 0, items: [] };
+  let jevCalls = 0;
   fakeBot.toss = async (type, _meta, count) => tossed.push({ type, count });
   fakeBot.inventory.items = () => [
     { name: 'bread', type: 297, count: 10 },
@@ -399,14 +401,14 @@ test('session routes unknown natural chat through Jev intent classifier and supp
   const session = createBotSession(cfg, {
     llm: {
       apiKey: 'fake-key',
-      ask: async () => ({
-        answers: {
-          intent: { choice: 'give', confidence: 0.96 },
-          resource: { choice: 'banh_mi', confidence: 1 },
-        },
-      }),
+      isAvailable: () => true,
+      ask: async () => {
+        jevCalls++;
+        return { answers: {} };
+      },
     },
     memory,
+    inboxState,
     tasks: new TaskCoordinator({ log: () => {} }),
     router: new CommandRouter(),
     createBotFn: () => fakeBot,
@@ -415,6 +417,13 @@ test('session routes unknown natural chat through Jev intent classifier and supp
 
   try {
     fakeBot.emit('chat', 'araslime', 'ê đói quá vứt cho tao 3 ổ bánh mì');
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(jevCalls, 0);
+    assert.deepEqual(tossed, []);
+    const deferred = inboxState.items.find(i => i.message.includes('vứt cho tao'));
+    assert.equal(deferred?.handledByBot, false);
+
+    fakeBot.emit('chat', 'araslime', 'đưa tôi 3 bánh mì');
     await new Promise(r => setTimeout(r, 30));
     assert.deepEqual(tossed, [{ type: 297, count: 3 }]);
     assert.ok(fakeBot._chats.some(c => c.includes('Đã đưa bạn 3 bread')));
@@ -576,80 +585,91 @@ test('session executes multi-step chain, prepares terrain, and restocks material
   }
 });
 
-test('session routes natural chat through System 2 chatLlm while reserving System 1 llm for Jev combat', async () => {
+test('session implements 3-tier Human Brain routing (Tier 0 direct commands, Tier 1 Jev danger alert, Tier 2 Antigravity inbox)', async () => {
   const fakeBot = makeFakeBot();
   fakeBot.findBlocks = () => [];
   fakeBot.dig = async () => {};
+  fakeBot.attack = () => {};
+  fakeBot.lookAt = async () => {};
+  fakeBot.setControlState = () => {};
+  fakeBot.clearControlStates = () => {};
   const memory = new Memory({ autoSaveMs: 0 });
   memory.set('home', { x: 0, y: 64, z: 0 });
   const tasks = new TaskCoordinator({ log: () => {} });
+  const inboxState = { seq: 0, items: [] };
 
-  let jevIntentCalls = 0;
+  let combatCalls = 0;
+  let survivalCalls = 0;
   const jevSystem1 = {
     apiKey: 'jev-key',
-    ask: async () => {
-      jevIntentCalls++;
-      return { model: 'jev-latest', answers: {} };
-    },
-  };
-
-  const chatPrompts = [];
-  const chatSystem2 = {
-    provider: 'deepseek',
     isAvailable: () => true,
-    interpretChat: async ({ message, botState }) => {
-      chatPrompts.push({ message, botState });
-      if (message.includes('ổn không')) {
-        return { model: 'deepseek-chat', reply: 'Mình vẫn ổn, máu đang 20/20!', commands: [] };
-      }
+    chooseCombat: async () => {
+      combatCalls++;
       return {
-        model: 'deepseek-chat',
-        reply: 'Ok để mình làm ruộng rồi về nhà ngay.',
-        commands: ['làm ruộng', 'về nhà'],
+        action: 'retreat',
+        confidence: 0.92,
+        probabilities: { retreat: 0.92 },
+        focus: 'closest_mob',
+        danger: 4,
+        urgentRetreat: 0.9,
+      };
+    },
+    chooseSurvivalAction: async () => {
+      survivalCalls++;
+      return {
+        action: 'escalate_antigravity',
+        confidence: 0.95,
+        urgency: 0.95,
+        abortTask: 0.9,
       };
     },
   };
 
   const session = createBotSession(DEFAULT_CONFIG, {
     llm: jevSystem1,
-    chatLlm: chatSystem2,
     memory,
     tasks,
+    inboxState,
     router: new CommandRouter(),
     createBotFn: () => fakeBot,
     loadPlugins: false,
   });
 
   try {
-    fakeBot.emit('chat', 'araslime', 'bạn thấy sao rồi còn ổn không?');
-    await new Promise(r => setTimeout(r, 20));
-    assert.equal(jevIntentCalls, 0);
-    assert.equal(chatPrompts.length, 1);
-    assert.equal(chatPrompts[0].botState.health, 20);
-    assert.ok(fakeBot._chats.some(c => c.includes('Mình vẫn ổn, máu đang 20/20!')));
-
-    fakeBot.emit('chat', 'araslime', 'giúp tôi dọn ruộng xong về nhà nghỉ nhé');
-    await new Promise(r => setTimeout(r, 40));
-    assert.equal(jevIntentCalls, 0);
-    assert.ok(fakeBot._chats.some(c => c.includes('Ok để mình làm ruộng rồi về nhà ngay.')));
-    assert.ok(fakeBot._chats.some(c => c.includes('Bắt đầu chuỗi 2 bước')));
-    assert.ok(fakeBot._chats.some(c => c.includes('Đã về tới nhà')));
-    assert.ok(fakeBot._chats.some(c => c.includes('Đã hoàn thành chuỗi nhiệm vụ')));
-
-    fakeBot._chats.length = 0;
-    fakeBot.emit('chat', 'araslime', 'làm ruộng ; còn ổn không bạn?');
-    await new Promise(r => setTimeout(r, 40));
-    assert.equal(jevIntentCalls, 0);
-    assert.ok(fakeBot._chats.some(c => c.includes('Mình vẫn ổn, máu đang 20/20!')));
-    assert.ok(fakeBot._chats.some(c => c.includes('Đã hoàn thành chuỗi nhiệm vụ')));
-
-    fakeBot._chats.length = 0;
+    fakeBot.emit('spawn');
     fakeBot.inventory.items = () => [{ name: 'oak_log', count: 6 }];
+
+    // 1) Tier 2: natural language & greetings defer to Antigravity inbox with zero Jev calls and zero spam
     fakeBot.emit('chat', 'araslime', 'chào bot');
+    fakeBot.emit('chat', 'araslime', 'bạn thấy sao rồi còn ổn không?');
+    fakeBot.emit('chat', 'araslime', 'giúp tôi dọn ruộng xong về nhà nghỉ nhé');
+    await new Promise(r => setTimeout(r, 25));
+    assert.equal(combatCalls, 0);
+    assert.equal(survivalCalls, 0);
+    assert.equal(fakeBot._chats.length, 0);
+    const deferredMsgs = inboxState.items.filter(i => i.kind === 'chat' && i.handledByBot === false);
+    assert.equal(deferredMsgs.length, 3);
+    assert.equal(deferredMsgs[0].role, 'OWNER_TRUSTED');
+
+    // 2) Tier 0: direct commands run locally and immediately without calling Jev
+    fakeBot.emit('chat', 'araslime', 'đứng đây');
     fakeBot.emit('chat', 'araslime', 'trong túi có gì?');
-    await new Promise(r => setTimeout(r, 20));
-    assert.ok(fakeBot._chats.some(c => c.includes('Chào araslime! Mình đang sẵn sàng')));
+    await new Promise(r => setTimeout(r, 25));
+    assert.ok(fakeBot._chats.some(c => c.includes('đứng yên')));
     assert.ok(fakeBot._chats.some(c => c.includes('oak_log:6')));
+    assert.ok(inboxState.items.some(i => i.message === 'đứng đây' && i.handledByBot === true));
+
+    // 3) Tier 1: critical combat danger triggers Jev chooseCombat/chooseSurvivalAction, aborts task, and alerts Antigravity inbox
+    tasks.run({ name: 'dao_sat' }, () => new Promise(() => {}));
+    fakeBot.health = 10;
+    fakeBot.entities = {
+      99: { id: 99, type: 'hostile', name: 'zombie', displayName: 'Zombie', position: pos(2, 64, 0), isValid: true },
+    };
+    await new Promise(r => setTimeout(r, 650));
+    assert.ok(combatCalls >= 1);
+    assert.ok(survivalCalls >= 1);
+    assert.ok(inboxState.items.some(i => i.kind === 'alert'));
+    assert.equal(tasks.active, null);
   } finally {
     await session.cleanup();
   }
@@ -742,39 +762,28 @@ test('session handles combat_off/combat_on, eat, drop_junk, AggregateError loggi
   }
 });
 
-test('session handles undefined health status, offline reply logging guard, and rolling chatHistory', async () => {
+test('session handles undefined health status, offline reply logging guard, and defers natural chat to Antigravity inbox', async () => {
   const fakeBot = makeFakeBot();
   fakeBot.health = undefined;
   fakeBot.entity = null;
 
   const botLogs = [];
+  const antigravityLogs = [];
   const mockLogger = {
     scoped: (tag) => (...args) => {
       if (tag === 'bot') botLogs.push(args.join(' '));
+      if (tag === 'antigravity') antigravityLogs.push(args.join(' '));
     },
     warn: () => {},
     error: () => {},
     recent: () => [],
   };
+  const inboxState = { seq: 0, items: [] };
 
-  const chatCalls = [];
-  const fakeChatLlm = {
-    provider: 'openrouter',
-    model: 'openrouter/free',
-    isAvailable: () => true,
-    interpretChat: async ({ message, history }) => {
-      chatCalls.push({ message, history: history.map(h => ({ ...h })) });
-      return { reply: `Đã nghe: ${message}`, commands: [] };
-    },
-  };
-
-  const session = createBotSession({
-    ...DEFAULT_CONFIG,
-    chat: { ...DEFAULT_CONFIG.chat, enabled: true, provider: 'openrouter', model: 'openrouter/free' },
-  }, {
+  const session = createBotSession(DEFAULT_CONFIG, {
     llm: {},
-    chatLlm: fakeChatLlm,
     logger: mockLogger,
+    inboxState,
     memory: new Memory({ autoSaveMs: 0 }),
     tasks: new TaskCoordinator({ log: () => {} }),
     router: new CommandRouter(),
@@ -789,19 +798,16 @@ test('session handles undefined health status, offline reply logging guard, and 
     assert.ok(botLogs.some(l => l.includes('Máu 20/20')));
     assert.ok(!botLogs.some(l => l.includes('NaN')));
 
-    // 2) Spawned bot sends in-game chat and passes rolling history to follow-up System 2 turns
+    // 2) Spawned bot defers natural chat to Antigravity inbox without spamming bot.chat()
     fakeBot.entity = { position: pos(0, 64, 0), isValid: true };
     fakeBot.emit('spawn');
-    await session.onCommand('hôm nay bạn sao rồi');
-    await session.onCommand('vừa nãy mình mới hỏi gì ấy nhỉ?');
+    fakeBot.emit('chat', 'araslime', 'hôm nay bạn sao rồi');
+    fakeBot.emit('chat', 'araslime', 'vừa nãy mình mới hỏi gì ấy nhỉ?');
+    await new Promise(r => setTimeout(r, 20));
 
-    assert.equal(chatCalls.length, 2);
-    assert.deepEqual(chatCalls[0].history, [{ role: 'user', text: 'trạng thái' }]);
-    assert.deepEqual(chatCalls[1].history, [
-      { role: 'user', text: 'trạng thái' },
-      { role: 'user', text: 'hôm nay bạn sao rồi' },
-      { role: 'assistant', text: 'Đã nghe: hôm nay bạn sao rồi' },
-    ]);
+    assert.equal(fakeBot._chats.length, 0);
+    assert.equal(antigravityLogs.length, 2);
+    assert.equal(inboxState.items.filter(i => i.kind === 'chat' && i.handledByBot === false).length, 2);
 
     // 3) After disconnect ('end'), even if entity is still truthy, reply logs via logger instead of bot.chat()
     fakeBot.emit('end');
@@ -872,104 +878,6 @@ test('session executes "bạn chặt cây cho tôi" as gather + give chain and t
   }
 });
 
-test('session uses System 2 humanizeReply and interpretChat for greet/ack/chain without robotic boilerplate and falls back on error', async () => {
-  const fakeBot = makeFakeBot();
-  const oakId = fakeBot.registry.blocksByName.oak_log.id;
-  const world = new Map([
-    ['1,64,0', { type: oakId, name: 'oak_log' }],
-    ['1,65,0', { type: oakId, name: 'oak_log' }],
-  ]);
-  const keyOf = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
-  const inv = [];
-  const tossed = [];
-
-  fakeBot.findBlocks = () => [...world.keys()].map(k => {
-    const [x, y, z] = k.split(',').map(Number);
-    return pos(x, y, z);
-  });
-  fakeBot.blockAt = (p) => {
-    const k = keyOf(p);
-    const b = world.get(k);
-    const [x, y, z] = k.split(',').map(Number);
-    return b ? { position: pos(x, y, z), ...b } : { position: pos(x, y, z), type: 0, name: 'air' };
-  };
-  fakeBot.dig = async (block) => {
-    world.delete(keyOf(block.position));
-    const stack = inv.find(i => i.name === 'oak_log');
-    if (stack) stack.count += 1;
-    else inv.push({ name: 'oak_log', type: oakId, count: 1 });
-  };
-  fakeBot.inventory.items = () => inv;
-  fakeBot.toss = async (type, _meta, count) => { tossed.push({ type, count }); };
-  fakeBot.collectBlock = { collect: async () => {} };
-
-  let failHumanize = false;
-  const humanCalls = [];
-  const chatLlm = {
-    provider: 'openrouter',
-    isAvailable: () => true,
-    interpretChat: async ({ message }) => {
-      if (message === 'hi') return { reply: 'Ê chào ông nha, nay chơi gì nè?', commands: [] };
-      if (message === 'ok cảm ơn') return { reply: 'Có gì đâu, cần gì cứ ới mình!', commands: [] };
-      return { reply: 'Ok nha.', commands: [] };
-    },
-    humanizeReply: async ({ userMessage, rawEvent }) => {
-      humanCalls.push({ userMessage, rawEvent });
-      if (failHumanize) throw new Error('rate limited');
-      if (rawEvent.includes('Đang bắt đầu')) {
-        return { reply: 'Đợi xíu mình ra chặt cây rồi mang gỗ qua liền nha.' };
-      }
-      if (rawEvent.includes('2 oak_log')) {
-        return { reply: 'Xong rồi nè, mình chặt hết với đưa bạn 2 oak_log luôn rồi đó!' };
-      }
-      return { reply: `Tự nhiên: ${rawEvent}` };
-    },
-  };
-
-  const session = createBotSession(DEFAULT_CONFIG, {
-    llm: {},
-    chatLlm,
-    memory: new Memory({ autoSaveMs: 0 }),
-    tasks: new TaskCoordinator({ log: () => {} }),
-    router: new CommandRouter(),
-    createBotFn: () => fakeBot,
-    loadPlugins: false,
-  });
-  session.survival._timeouts = { ...session.survival._timeouts, verifyDelayMs: 0, dropWaitMs: 0 };
-
-  try {
-    fakeBot.emit('spawn');
-
-    // 1) greet and ack go through chatLlm instead of robotic templates
-    fakeBot.emit('chat', 'araslime', 'hi');
-    fakeBot.emit('chat', 'araslime', 'ok cảm ơn');
-    await new Promise(r => setTimeout(r, 25));
-    assert.ok(fakeBot._chats.includes('Ê chào ông nha, nay chơi gì nè?'));
-    assert.ok(fakeBot._chats.includes('Có gì đâu, cần gì cứ ới mình!'));
-    assert.ok(!fakeBot._chats.some(c => c.includes('Mình đang sẵn sàng')));
-    assert.ok(!fakeBot._chats.some(c => c.includes('Không có gì!')));
-
-    // 2) chain suppresses "Bắt đầu chuỗi X bước" & "Đã hoàn thành chuỗi nhiệm vụ", replies naturally
-    fakeBot._chats.length = 0;
-    fakeBot.emit('chat', 'araslime', 'bạn chặt cây cho tôi');
-    await new Promise(r => setTimeout(r, 150));
-    assert.equal(world.size, 0);
-    assert.deepEqual(tossed, [{ type: oakId, count: 2 }]);
-    assert.ok(!fakeBot._chats.some(c => c.includes('Bắt đầu chuỗi')));
-    assert.ok(!fakeBot._chats.some(c => c.includes('Đã hoàn thành chuỗi nhiệm vụ')));
-    assert.ok(fakeBot._chats.some(c => c.includes('2 oak_log') && c.includes('Xong rồi nè')));
-
-    // 3) error in humanizeReply cleanly falls back to local Vietnamese reply
-    fakeBot._chats.length = 0;
-    failHumanize = true;
-    fakeBot.emit('chat', 'araslime', 'đứng đây');
-    await new Promise(r => setTimeout(r, 25));
-    assert.ok(fakeBot._chats.some(c => c.includes('Được, tôi đứng yên đây.')));
-  } finally {
-    await session.cleanup();
-  }
-});
-
 test('nhat_do_chet stops cleanly after repeated combat interruptions and keeps lastDeath', async () => {
   const fakeBot = makeFakeBot();
   const memory = new Memory({ autoSaveMs: 0 });
@@ -997,90 +905,12 @@ test('nhat_do_chet stops cleanly after repeated combat interruptions and keeps l
 
   try {
     fakeBot.emit('spawn');
-    await new Promise(r => setTimeout(r, 750));
+    await new Promise(r => setTimeout(r, 1100));
 
     assert.equal(attempts, 3);
     assert.equal(tasks.active, null);
     assert.ok(memory.get('lastDeath'));
     assert.ok(fakeBot._chats.some(c => c.includes('quái nguy hiểm')));
-  } finally {
-    await session.cleanup();
-  }
-});
-
-test('session exposes home in botState, filters hallucinated waypoints/home from LLM, and drops stale superseded commands', async () => {
-  const fakeBot = makeFakeBot();
-  let farmed = 0;
-  fakeBot.findBlock = () => null;
-  fakeBot.findBlocks = () => [];
-  const memory = new Memory({ autoSaveMs: 0 });
-  const tasks = new TaskCoordinator({ log: () => {} });
-
-  const botStates = [];
-  let releaseSlowChat = null;
-  const slowChatPromise = new Promise(resolve => { releaseSlowChat = resolve; });
-
-  const fakeChatLlm = {
-    provider: 'openrouter',
-    isAvailable: () => true,
-    interpretChat: async ({ message, botState }) => {
-      botStates.push({ message, home: botState.home, waypoints: botState.waypoints });
-      if (message === 'đề xuất cho tôi đi') {
-        return {
-          reply: 'Chưa lưu điểm mỏ hay nhà đâu nhé.',
-          commands: ['đi tới mỏ', 'về nhà'],
-        };
-      }
-      if (message === 'lệnh chậm bị đè') {
-        await slowChatPromise;
-        return {
-          reply: 'Giờ mới xong nè.',
-          commands: ['làm ruộng'],
-        };
-      }
-      return { reply: 'Ok.', commands: [] };
-    },
-  };
-
-  fakeBot.findBlocks = () => {
-    farmed++;
-    return [];
-  };
-
-  const session = createBotSession(DEFAULT_CONFIG, {
-    llm: {},
-    chatLlm: fakeChatLlm,
-    memory,
-    tasks,
-    router: new CommandRouter(),
-    createBotFn: () => fakeBot,
-    loadPlugins: false,
-  });
-
-  try {
-    fakeBot.emit('spawn');
-
-    // 1) home is null in botState and hallucinated goto_waypoint/go_home are filtered out
-    await session.onCommand('đề xuất cho tôi đi');
-    assert.equal(botStates[0].home, null);
-    assert.deepEqual(botStates[0].waypoints, []);
-    assert.equal(tasks.active, null);
-    assert.ok(!fakeBot._chats.some(c => c.includes('Chưa có nhà nào được đặt') || c.includes('Không tìm thấy điểm')));
-
-    // Direct user command "về nhà" still preserves clear error when home is unset
-    await session.onCommand('về nhà');
-    assert.ok(fakeBot._chats.some(c => c.includes('Chưa có nhà nào được đặt')));
-
-    // 2) Slow LLM call superseded by newer chat command drops stale commands
-    farmed = 0;
-    const p1 = session.onCommand('lệnh chậm bị đè');
-    await new Promise(r => setTimeout(r, 10));
-    await session.onCommand('đứng đây');
-    releaseSlowChat();
-    await p1;
-    await new Promise(r => setTimeout(r, 20));
-    assert.equal(farmed, 0);
-    assert.equal(tasks.active, null);
   } finally {
     await session.cleanup();
   }
@@ -1130,21 +960,13 @@ test('session Phase 1 readiness blocks low-food heavy work with confirm/cancel, 
   const memory = new Memory({ autoSaveMs: 0 });
   memory.set('home', { x: 0, y: 64, z: 0 });
   const tasks = new TaskCoordinator({ log: () => {} });
-  const botStates = [];
-  const fakeChatLlm = {
-    provider: 'openrouter',
-    isAvailable: () => true,
-    interpretChat: async ({ message, botState }) => {
-      botStates.push({ message, readiness: botState.readiness });
-      return { reply: 'Mình thấy túi hơi trống.', commands: [] };
-    },
-  };
+  const inboxState = { seq: 0, items: [] };
 
   const session = createBotSession(DEFAULT_CONFIG, {
     llm: {},
-    chatLlm: fakeChatLlm,
     memory,
     tasks,
+    inboxState,
     router: new CommandRouter(),
     createBotFn: () => fakeBot,
     loadPlugins: false,
@@ -1154,14 +976,12 @@ test('session Phase 1 readiness blocks low-food heavy work with confirm/cancel, 
   try {
     fakeBot.emit('spawn');
 
-    // 1) "đề xuất" passes readiness to LLM snapshot
-    await session.onCommand('đề xuất cho tôi đi');
-    assert.deepEqual(botStates[0].readiness, {
-      foodPoints: 0,
-      minFoodPoints: 20,
-      foodOk: false,
-      pickaxe: 'none',
-    });
+    // 1) Natural request defers cleanly to Antigravity inbox without starting heavy work
+    fakeBot.emit('chat', 'araslime', 'đề xuất cho tôi đi');
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(tasks.active, null);
+    assert.equal(fakeBot._chats.length, 0);
+    assert.ok(inboxState.items.some(i => i.message === 'đề xuất cho tôi đi' && i.handledByBot === false));
 
     // 2) "đào hầm 8" with no pickaxe is hard-blocked; follow-up "xác nhận" has no pending action
     fakeBot._chats.length = 0;
@@ -1303,57 +1123,6 @@ test('session cleanup clears queued tasks, survival.busy pauses work, and slow l
     assert.equal(tasks.active, null);
     assert.equal(tasks.status().queued.length, 0);
     await assert.rejects(queued.promise, /Ngắt kết nối/);
-  } finally {
-    await session.cleanup();
-  }
-});
-
-test('session classifyIntent fallback drops stale command when a newer chat message arrives', async () => {
-  const fakeBot = makeFakeBot();
-  const tasks = new TaskCoordinator({ log: () => {} });
-  const memory = new Memory({ autoSaveMs: 0 });
-  let releaseIntent;
-  let farmed = 0;
-
-  const slowJevLlm = {
-    apiKey: 'test-key',
-    ask: () => new Promise((resolve) => {
-      releaseIntent = () => resolve({
-        answers: {
-          intent: { choice: 'farm', confidence: 0.95 },
-          resource: { choice: 'none', confidence: 0.9 },
-        },
-      });
-    }),
-  };
-
-  const session = createBotSession({
-    ...DEFAULT_CONFIG,
-    chat: { ...DEFAULT_CONFIG.chat, enabled: false },
-  }, {
-    llm: slowJevLlm,
-    chatLlm: null,
-    memory,
-    tasks,
-    router: new CommandRouter(),
-    createBotFn: () => fakeBot,
-    loadPlugins: false,
-  });
-  session.mining.farmCrops = async () => {
-    farmed++;
-    return { harvested: 0, replanted: 0 };
-  };
-
-  try {
-    fakeBot.emit('spawn');
-    const p1 = session.onCommand('đi kiểm tra ruộng lúa giùm nha');
-    await new Promise(r => setTimeout(r, 15));
-    await session.onCommand('đứng đây');
-    releaseIntent();
-    await p1;
-    await new Promise(r => setTimeout(r, 20));
-    assert.equal(farmed, 0);
-    assert.equal(tasks.active, null);
   } finally {
     await session.cleanup();
   }

@@ -42,32 +42,37 @@ test('loadConfig deep-merges partial overrides without dropping nested defaults'
   }
 });
 
-test('DEFAULT_CONFIG uses crowllm particle-1:free with grok-4.7-fast:free fallback for chat and keeps typesafe for llm', () => {
+test('DEFAULT_CONFIG uses Antigravity MCP as main brain, Jev typesafe for fast support, and enables dashboard', () => {
   assert.equal(DEFAULT_CONFIG.llm.provider, 'typesafe');
   assert.equal(DEFAULT_CONFIG.llm.model, 'jev-latest');
-  assert.equal(DEFAULT_CONFIG.chat.provider, 'crowllm');
-  assert.equal(DEFAULT_CONFIG.chat.model, 'particle-1:free');
-  assert.deepEqual(DEFAULT_CONFIG.chat.fallbackModels, ['grok-4.7-fast:free']);
-  assert.equal(DEFAULT_CONFIG.chat.baseUrl, 'https://crowllm.com/v1');
-  assert.equal(DEFAULT_CONFIG.chat.apiKeyEnv, 'CROWLLM_API_KEY');
+  assert.equal(DEFAULT_CONFIG.llm.baseUrl, 'https://api.typesafe.ai');
+  assert.equal(DEFAULT_CONFIG.llm.apiKeyEnv, 'TYPESAFE_API_KEY');
+  assert.equal(DEFAULT_CONFIG.chat, undefined);
+  assert.equal(DEFAULT_CONFIG.dashboard.enabled, true);
 });
 
-test('loadConfig clears inherited crowllm defaults when chat.provider is overridden', async () => {
+test('loadConfig ignores legacy chat fields cleanly while preserving core Jev and dashboard overrides', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-cfg-provider-'));
   const file = path.join(dir, 'config.json');
   try {
     await fs.writeFile(file, JSON.stringify({
+      llm: {
+        model: 'jev-fast',
+      },
       chat: {
         provider: 'deepseek',
         model: 'deepseek-chat',
       },
+      dashboard: {
+        port: 4123,
+      },
     }));
     const cfg = loadConfig(file);
-    assert.equal(cfg.chat.provider, 'deepseek');
-    assert.equal(cfg.chat.model, 'deepseek-chat');
-    assert.deepEqual(cfg.chat.fallbackModels, []);
-    assert.equal(cfg.chat.baseUrl, undefined);
-    assert.equal(cfg.chat.apiKeyEnv, undefined);
+    assert.equal(cfg.llm.provider, 'typesafe');
+    assert.equal(cfg.llm.model, 'jev-fast');
+    assert.equal(cfg.llm.apiKeyEnv, 'TYPESAFE_API_KEY');
+    assert.equal(cfg.dashboard.enabled, true);
+    assert.equal(cfg.dashboard.port, 4123);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

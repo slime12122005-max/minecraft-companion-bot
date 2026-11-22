@@ -216,6 +216,8 @@ test('MCP Stdio subprocess communicates end-to-end with live DashboardServer', a
     controls: [],
     inv: [],
     connects: [],
+    plans: [],
+    smelts: [],
   };
   let inboxSeq = 1;
   const inboxMsgs = [{ id: 1, kind: 'chat', username: 'araslime', isOwner: true, message: 'đào gỗ đi' }];
@@ -264,6 +266,14 @@ test('MCP Stdio subprocess communicates end-to-end with live DashboardServer', a
     onSay: async ({ message, whisperTo }) => {
       actions.says.push({ message, whisperTo });
       return { ok: true, sent: [message], whisperTo };
+    },
+    onPlanExecute: async (payload) => {
+      actions.plans.push(payload);
+      return { ok: true, goal: payload.goal, completedSteps: payload.steps?.length ?? 0 };
+    },
+    onSmelt: async (payload) => {
+      actions.smelts.push(payload);
+      return { ok: true, action: payload.action || 'status', activeJobs: [] };
     },
     log: () => {},
   });
@@ -371,11 +381,24 @@ test('MCP Stdio subprocess communicates end-to-end with live DashboardServer', a
     const waitRes = await call(11, 'mc_wait_event', { waitFor: 'task_done', timeoutSec: 2 });
     assert.equal(waitRes.reason, 'task_done');
 
+    const planRes = await call(12, 'mc_plan_execute', {
+      goal: 'Lấy gỗ rồi về',
+      steps: [{ type: 'command', command: 'đứng đây' }],
+      wait: true,
+    });
+    assert.equal(planRes.ok, true);
+    assert.equal(actions.plans.length, 1);
+
+    const smeltRes = await call(13, 'mc_smelt', { action: 'status' });
+    assert.equal(smeltRes.ok, true);
+    assert.equal(actions.smelts.length, 1);
+
     child.stdin.end();
     const exitCode = await new Promise((resolve) => child.once('exit', resolve));
     assert.equal(exitCode, 0);
     assert.deepEqual(strayLines, []);
-    assert.equal(stderrChunks.join(''), '');
+    const filteredStderr = stderrChunks.join('').replace(/^\(node:\d+\) ExperimentalWarning:.*\r?\n?/gm, '').trim();
+    assert.equal(filteredStderr, '');
   } finally {
     rl.close();
     if (child.exitCode === null) child.kill();
@@ -400,10 +423,9 @@ test('createBotSession records spawn, chat, whisper, death, and kicked events in
   const addr = await dash.start();
 
   const session = createBotSession(
-    { ...DEFAULT_CONFIG, chat: { ...DEFAULT_CONFIG.chat, enabled: false } },
+    DEFAULT_CONFIG,
     {
       llm: {},
-      chatLlm: null,
       memory: mem,
       tasks,
       router,
@@ -541,16 +563,16 @@ test('createBotSession with chat.mcpChat defers greet/ack/unknown to Antigravity
   let jevCalled = false;
 
   const session = createBotSession(
-    { ...DEFAULT_CONFIG, chat: { ...DEFAULT_CONFIG.chat, enabled: false, humanReply: false, mcpChat: true } },
+    DEFAULT_CONFIG,
     {
       llm: {
         apiKey: 'dummy-key',
-        ask: async () => {
+        isAvailable: () => true,
+        chooseCombat: async () => {
           jevCalled = true;
-          return { answers: { intent: { choice: 'gather', confidence: 0.99 }, resource: { choice: 'sat', confidence: 0.99 } } };
+          return { action: 'attack_melee', confidence: 0.9, danger: 1, urgentRetreat: 0 };
         },
       },
-      chatLlm: null,
       memory: mem,
       tasks,
       router,
@@ -609,15 +631,15 @@ test('createBotSession with chat.mcpChat defers greet/ack/unknown to Antigravity
   }
 });
 
-test('MCP cross-process ControlLease suppresses internal LLM, tags inbox roles, preserves emergency commands, and runs mc_run_macro', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-lease-'));
+test('MCP Antigravity planner executes mc_plan_execute, mc_smelt, tags inbox roles, wakes mc_wait_event on alert, and preserves emergency commands', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-planner-'));
   const mem = new Memory({ dbPath: path.join(dir, 'mem.db') });
   await mem.load();
   const tasks = new TaskCoordinator({ log: () => {} });
   const router = new CommandRouter();
   const inboxState = { seq: 0, items: [] };
   const chats = [];
-  let llmCalls = 0;
+  let jevCalls = 0;
   let fakeBot;
 
   const dash = new DashboardServer({
@@ -630,21 +652,18 @@ test('MCP cross-process ControlLease suppresses internal LLM, tags inbox roles, 
   const addr = await dash.start();
 
   const session = createBotSession(
-    { ...DEFAULT_CONFIG, chat: { ...DEFAULT_CONFIG.chat, enabled: true, humanReply: false, mcpChat: false } },
+    DEFAULT_CONFIG,
     {
       llm: {
         apiKey: 'dummy-key',
-        ask: async () => {
-          llmCalls += 1;
-          return { answers: { intent: { choice: 'farm', confidence: 0.99 }, resource: { choice: 'none', confidence: 0.9 } } };
-        },
-      },
-      chatLlm: {
-        provider: 'openrouter',
         isAvailable: () => true,
-        interpretChat: async () => {
-          llmCalls += 1;
-          return { reply: 'internal llm reply', commands: [] };
+        chooseCombat: async () => {
+          jevCalls += 1;
+          return { action: 'attack_melee', confidence: 0.9, danger: 1, urgentRetreat: 0 };
+        },
+        chooseSurvivalAction: async () => {
+          jevCalls += 1;
+          return { action: 'continue', confidence: 0.8, urgency: 0.2, abortTask: 0 };
         },
       },
       memory: mem,
@@ -688,17 +707,21 @@ test('MCP cross-process ControlLease suppresses internal LLM, tags inbox roles, 
 
   const handle = createMcpHandler({
     baseUrl: `http://${addr.host}:${addr.port}`,
+    pollIntervalMs: 15,
   });
 
   try {
     fakeBot.emit('spawn');
     fakeBot.emit('chat', 'stranger', 'hello bot');
-    fakeBot.emit('chat', 'araslime', 'bạn xem quanh có gì không');
-    await new Promise(r => setTimeout(r, 20));
-    // Before lease, internal LLM handled owner chat
-    assert.equal(llmCalls, 1);
+    fakeBot.emit('chat', 'araslime', 'hãy nghĩ xem nên xây nhà kiểu gì');
+    fakeBot.emit('chat', 'araslime', '!stop');
+    await new Promise(r => setTimeout(r, 25));
 
-    // Calling mc_get_inbox sets ControlLease across HTTP and returns role tags
+    // Zero internal Jev calls on natural chat; !stop executes immediately
+    assert.equal(jevCalls, 0);
+    assert.ok(chats.some(c => c.includes('đứng yên')));
+
+    // Inbox tags UNTRUSTED_PUBLIC_PLAYER / OWNER_TRUSTED / SYSTEM
     const inboxRes = await handle({
       jsonrpc: '2.0',
       id: 1,
@@ -707,25 +730,16 @@ test('MCP cross-process ControlLease suppresses internal LLM, tags inbox roles, 
     });
     const inboxData = JSON.parse(inboxRes.result.content[0].text);
     const strangerMsg = inboxData.messages.find(m => m.username === 'stranger');
-    const ownerMsg = inboxData.messages.find(m => m.username === 'araslime');
+    const ownerMsg = inboxData.messages.find(m => m.username === 'araslime' && m.handledByBot === false);
     const spawnMsg = inboxData.messages.find(m => m.kind === 'spawn');
     assert.equal(strangerMsg.role, 'UNTRUSTED_PUBLIC_PLAYER');
     assert.equal(ownerMsg.role, 'OWNER_TRUSTED');
     assert.equal(spawnMsg.role, 'SYSTEM');
 
     const stateData = dash.getState();
-    assert.equal(stateData.mcpLeaseActive, true);
+    assert.equal(stateData.brains.planner, 'Antigravity (MCP)');
 
-    // Under active ControlLease: natural unknown chat does NOT call internal LLM, while !stop still runs immediately
-    llmCalls = 0;
-    chats.length = 0;
-    fakeBot.emit('chat', 'araslime', 'hãy nghĩ xem nên xây nhà kiểu gì');
-    fakeBot.emit('chat', 'araslime', '!stop');
-    await new Promise(r => setTimeout(r, 20));
-    assert.equal(llmCalls, 0);
-    assert.ok(chats.some(c => c.includes('đứng yên')));
-
-    // mc_run_macro executes prepare_caving_kit end-to-end over HTTP -> Dashboard -> MacroRunner
+    // mc_run_macro executes prepare_caving_kit end-to-end
     const macroRes = await handle({
       jsonrpc: '2.0',
       id: 2,
@@ -736,6 +750,69 @@ test('MCP cross-process ControlLease suppresses internal LLM, tags inbox roles, 
     assert.equal(macroData.ok, true);
     assert.equal(macroData.macro, 'prepare_caving_kit');
     assert.equal(macroData.completedSteps.length, 5);
+
+    // mc_smelt status works over HTTP -> DashboardBridge -> SmeltingManager
+    const smeltRes = await handle({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: { name: 'mc_smelt', arguments: { action: 'status' } },
+    });
+    const smeltData = JSON.parse(smeltRes.result.content[0].text);
+    assert.equal(smeltData.ok, true);
+    assert.equal(Array.isArray(smeltData.jobs), true);
+
+    // mc_plan_execute runs multi-step plan and posts plan_completed to inbox
+    chats.length = 0;
+    const planRes = await handle({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: {
+        name: 'mc_plan_execute',
+        arguments: {
+          goal: 'Chuẩn bị và đứng chờ',
+          steps: [
+            { type: 'say', message: 'Đang chạy kế hoạch của Antigravity!' },
+            { type: 'command', command: 'đứng đây' },
+            { type: 'macro', macro: 'prepare_caving_kit' },
+          ],
+          onDanger: 'pause_and_resume',
+          wait: true,
+        },
+      },
+    });
+    const planData = JSON.parse(planRes.result.content[0].text);
+    assert.equal(planData.ok, true);
+    assert.ok(chats.some(c => c.includes('Đang chạy kế hoạch của Antigravity!')));
+    assert.ok(inboxState.items.some(i => i.kind === 'plan_completed'));
+
+    // mc_wait_event with waitFor='alert' wakes immediately on critical danger alerts
+    const sinceBeforeAlert = inboxState.seq;
+    setTimeout(() => {
+      inboxState.items.push({
+        id: ++inboxState.seq,
+        ts: new Date().toISOString(),
+        kind: 'alert',
+        role: 'SYSTEM',
+        severity: 'critical',
+        username: 'bot_dong_hanh',
+        isOwner: false,
+        message: 'Creeper quá gần!',
+      });
+    }, 25);
+    const alertRes = await handle({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: {
+        name: 'mc_wait_event',
+        arguments: { waitFor: 'alert', sinceInboxId: sinceBeforeAlert, timeoutSec: 2 },
+      },
+    });
+    const alertData = JSON.parse(alertRes.result.content[0].text);
+    assert.equal(alertData.reason, 'alert');
+    assert.match(JSON.stringify(alertData), /Creeper quá gần!/);
   } finally {
     await session.cleanup();
     await dash.stop();

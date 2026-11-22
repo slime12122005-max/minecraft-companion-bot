@@ -5,7 +5,7 @@ export function createCommandDispatcher(ctx) {
   const { bot, tasks, combat, survival, crafting, mining, state } = ctx;
 
   async function dispatchParsedCommand(parsed, username, reply, parentSignal = null, chatCtx = null) {
-    const say = (text, { kind = 'final', isStale = null } = {}) => {
+    const say = (text, { kind = 'final' } = {}) => {
       if (!text) return Promise.resolve();
       if (chatCtx?.onOutcome) {
         if (kind === 'start' && chatCtx.suppressStart) return Promise.resolve();
@@ -13,18 +13,9 @@ export function createCommandDispatcher(ctx) {
           chatCtx.onOutcome(text);
           return Promise.resolve();
         }
-        return ctx.replyHuman(text, { userMessage: chatCtx?.userMessage ?? '', replyFn: reply, isStale });
       }
-      if (!ctx.canHumanChat()) {
-        reply(text);
-        return Promise.resolve();
-      }
-      if (kind === 'start') {
-        if (chatCtx?.alreadyAcked) return Promise.resolve();
-        ctx.replyHuman(text, { userMessage: chatCtx?.userMessage ?? '', replyFn: reply, isStale }).catch(() => {});
-        return Promise.resolve();
-      }
-      return ctx.replyHuman(text, { userMessage: chatCtx?.userMessage ?? '', replyFn: reply, isStale });
+      reply(text);
+      return Promise.resolve();
     };
     const errorReply = (msg) => { say(msg, { kind: 'error' }).catch(() => {}); };
 

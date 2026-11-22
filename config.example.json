@@ -13,16 +13,6 @@
     "apiKeyEnv": "TYPESAFE_API_KEY",
     "jevIntervalMs": 2000
   },
-  "chat": {
-    "enabled": true,
-    "humanReply": true,
-    "mcpChat": false,
-    "provider": "crowllm",
-    "model": "particle-1:free",
-    "fallbackModels": ["grok-4.7-fast:free"],
-    "baseUrl": "https://crowllm.com/v1",
-    "apiKeyEnv": "CROWLLM_API_KEY"
-  },
   "combat": {
     "enabled": true,
     "defendOwner": true,
@@ -53,7 +43,7 @@
     "minFoodPoints": 20
   },
   "dashboard": {
-    "enabled": false,
+    "enabled": true,
     "host": "127.0.0.1",
     "port": 3000
   }

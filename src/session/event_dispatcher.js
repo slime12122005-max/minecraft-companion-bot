@@ -143,6 +143,8 @@ export function bindSessionEvents(ctx) {
 
   let combatTicking = false;
   let lastSlowMaintainAt = 0;
+  let lastDangerAlertAt = 0;
+  let jevSurvivalPending = false;
 
   const loop = setInterval(async () => {
     if (disposed || !bot.entity || bot.isAlive === false || combatTicking) return;
@@ -172,6 +174,56 @@ export function bindSessionEvents(ctx) {
           target: combat.targetId ? bot.entities?.[combat.targetId] : null,
         };
         await combat.tick(tickState);
+
+        const jevTele = combat.lastJevTelemetry;
+        const jevUrgent = (jevTele?.urgentRetreat ?? 0) >= 0.7 ||
+          (combat.lastDecision?.action === 'retreat' && (jevTele?.danger ?? 0) >= 2);
+        const criticalDanger = combat.busy && ((bot.health ?? 20) <= 8 || jevUrgent);
+        if (criticalDanger && now - lastDangerAlertAt >= 10000) {
+          lastDangerAlertAt = now;
+          const curTaskName = tasks.status().active?.name ?? 'rảnh';
+          ctx.pushInbox?.({
+            kind: 'alert',
+            role: 'SYSTEM',
+            severity: (bot.health ?? 20) <= 6 || jevUrgent ? 'critical' : 'high',
+            username: bot.username,
+            message: `Cảnh báo nguy hiểm khi chiến đấu (máu ${Math.round(bot.health ?? 20)}/20)`,
+            health: bot.health ?? 20,
+            task: curTaskName,
+            jev: jevTele ?? null,
+          });
+          if (
+            ctx.llm?.isAvailable?.() &&
+            typeof ctx.llm.chooseSurvivalAction === 'function' &&
+            tasks.active &&
+            !tasks.active.aborted &&
+            jevUrgent &&
+            !jevSurvivalPending
+          ) {
+            jevSurvivalPending = true;
+            ctx.llm.chooseSurvivalAction({
+              health: bot.health ?? 20,
+              food: bot.food ?? 20,
+              task: curTaskName,
+              combatAction: combat.lastDecision?.action ?? 'retreat',
+              danger: jevTele?.danger ?? null,
+            }).then((decision) => {
+              if (!disposed && decision && ((decision.abortTask ?? 0) >= 0.75 || decision.action === 'escalate_antigravity' || decision.action === 'return_home')) {
+                ctx.stopCurrentTask('Jev phát hiện nguy hiểm cao');
+                ctx.pushInbox?.({
+                  kind: 'alert',
+                  role: 'SYSTEM',
+                  severity: 'critical',
+                  username: bot.username,
+                  message: `Jev yêu cầu hủy tác vụ "${curTaskName}" (${decision.action}) để tránh nguy hiểm`,
+                  jevSurvival: decision,
+                });
+              }
+            }).catch(() => {}).finally(() => {
+              jevSurvivalPending = false;
+            });
+          }
+        }
       }
 
       stateMachine.sync({

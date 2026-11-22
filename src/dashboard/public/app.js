@@ -258,13 +258,13 @@ function renderState(s) {
 
   if (s.brains) {
     document.getElementById('brains').innerHTML =
-      `<div class="stat"><span>System 1 (Jev)</span><strong>${safeEsc(s.brains.system1 || '-')}</strong></div>` +
-      `<div class="stat"><span>System 2 (Chat)</span><strong>${safeEsc(s.brains.system2 || '-')}</strong></div>`;
+      `<div class="stat"><span>Não chính (System 2)</span><strong>${safeEsc(s.brains.planner || s.brains.system2 || 'Antigravity (MCP)')}</strong></div>` +
+      `<div class="stat"><span>Hỗ trợ nhanh (System 1)</span><strong>${safeEsc(s.brains.tacticalSupport || s.brains.system1 || '-')}</strong></div>`;
   }
 
   const statsEl = document.getElementById('aiStats');
   if (statsEl && s.aiStats) {
-    statsEl.textContent = `System 2 Calls: ${s.aiStats.requests ?? 0} | Lỗi: ${s.aiStats.errors ?? 0} | Cache hit: ${s.aiStats.cacheHits ?? 0}`;
+    statsEl.textContent = `Jev Calls: ${s.aiStats.requests ?? 0} | Lỗi: ${s.aiStats.errors ?? 0} | Rate-limit: ${s.aiStats.rateLimited ?? 0}`;
   }
 
   if (s.jev) {

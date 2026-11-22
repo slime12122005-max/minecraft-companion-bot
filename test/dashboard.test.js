@@ -246,9 +246,14 @@ test('createDashboardBridge enriches state and executes emergency controls and i
       chat: (m) => events.push(['chat', m]),
       quit: (r) => events.push(['quit', r]),
     },
-    config: { minecraft: { host: 'localhost', port: 25565 }, owner: 'araslime', chat: { enabled: true } },
-    llm: { apiKey: 'k', provider: 'typesafe', model: 'jev-latest' },
-    chatLlm: { isAvailable: () => true, provider: 'crowllm', model: 'particle-1:free', fallbackModels: [], stats: () => ({ requests: 2, errors: 0, cacheHits: 1 }) },
+    config: { minecraft: { host: 'localhost', port: 25565 }, owner: 'araslime', llm: { model: 'jev-latest' } },
+    llm: {
+      isAvailable: () => true,
+      apiKey: 'k',
+      provider: 'typesafe',
+      model: 'jev-latest',
+      stats: () => ({ requests: 2, errors: 0, rateLimited: 0, avgLatencyMs: 12 }),
+    },
     memory: {
       queryPois: () => [{ id: 1, category: 'home', label: 'nha', x: 0, y: 64, z: 0 }],
       flush: async () => events.push(['flush']),
@@ -287,6 +292,8 @@ test('createDashboardBridge enriches state and executes emergency controls and i
   assert.equal(snap.threat.posture, 'aggressive');
   assert.equal(snap.taskQueue.active.name, 'mine_iron');
   assert.equal(snap.aiStats.requests, 2);
+  assert.equal(snap.brains.planner, 'Antigravity (MCP)');
+  assert.equal(snap.brains.tacticalSupport, 'Jev (jev-latest)');
 
   const toggleRes = await bridge.onControl({ action: 'toggle_ai' });
   assert.equal(toggleRes.aiPaused, true);
@@ -514,9 +521,8 @@ test('createDashboardBridge provides nearby scan, inbox filtering, chunked say, 
       chat: (m) => chats.push(m),
       whisper: (u, m) => whispers.push([u, m]),
     },
-    config: { minecraft: { host: 'localhost', port: 25565 }, owner: 'araslime', chat: { enabled: false } },
+    config: { minecraft: { host: 'localhost', port: 25565 }, owner: 'araslime' },
     llm: {},
-    chatLlm: null,
     memory: { queryPois: () => [] },
     tasks,
     router: { route: () => ({ command: { type: 'follow' }, tier: 'exact' }) },

@@ -1,10 +1,9 @@
 import path from 'node:path';
 import { downloadSchematic } from '../building/index.js';
-import { classifyIntent } from '../jev_intent.js';
 import { formatError } from './task_helpers.js';
 
 export async function handleComplexCommand(ctx, parsed, { username, reply, parentSignal, chatCtx, say, errorReply }) {
-  const { bot, config, llm, chatLlm, builder, chatHistory, logFor, errorFor, state } = ctx;
+  const { bot, builder, state } = ctx;
 
   switch (parsed.type) {
     case 'download_schematic':
@@ -113,142 +112,56 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
     case 'chain': {
       const steps = parsed.steps ?? [];
       if (steps.length === 0) return true;
-      const humanChain = ctx.canHumanChat() && !chatCtx?.onOutcome;
-      let chainDone = false;
-      let activeChainSignal = null;
       const outcomes = [];
-
-      if (!humanChain) {
+      if (!chatCtx?.onOutcome) {
         reply(`Bắt đầu chuỗi ${steps.length} bước.`);
-      } else if (!chatCtx?.alreadyAcked) {
-        ctx.replyHuman(`Đang bắt đầu làm: ${chatCtx?.userMessage || 'nhiệm vụ'}`, {
-          userMessage: chatCtx?.userMessage ?? '',
-          replyFn: reply,
-          isStale: () => chainDone || activeChainSignal?.aborted,
-        }).catch(() => {});
       }
 
       await ctx.runStepTask({ name: 'chuoi_nhiem_vu', reason: 'Lệnh chuỗi nhiều bước', steps: steps.length }, async (signal) => {
-        activeChainSignal = signal;
-        try {
-          const stepCtx = humanChain
-            ? {
-                userMessage: chatCtx?.userMessage ?? '',
-                alreadyAcked: true,
-                suppressStart: true,
-                ignoreFood: Boolean(chatCtx?.ignoreFood),
-                onOutcome: (t) => outcomes.push(t),
-              }
-            : {
-                ...(chatCtx ?? {}),
-                ignoreFood: Boolean(chatCtx?.ignoreFood),
-              };
+        const stepCtx = chatCtx?.onOutcome
+          ? {
+              ...(chatCtx ?? {}),
+              suppressStart: true,
+              ignoreFood: Boolean(chatCtx?.ignoreFood),
+              onOutcome: (t) => {
+                outcomes.push(t);
+                chatCtx.onOutcome(t);
+              },
+            }
+          : {
+              ...(chatCtx ?? {}),
+              ignoreFood: Boolean(chatCtx?.ignoreFood),
+            };
 
-          for (let i = 0; i < steps.length; i++) {
-            if (signal.aborted) break;
-            let step = steps[i];
-            const mcpLeaseActive = !chatCtx?.fromApi && Date.now() < (state.mcpLeaseUntil || 0);
-            if (step.type === 'unknown' && !mcpLeaseActive) {
-              if (config.chat?.enabled !== false && chatLlm?.isAvailable?.() && chatLlm.provider !== 'typesafe') {
-                try {
-                  const chatRes = await chatLlm.interpretChat({
-                    message: step.raw,
-                    botState: ctx.getBotStateSnapshot(),
-                    history: chatHistory.slice(-6),
-                  });
-                  if (chatRes?.commands?.length > 0) {
-                    logFor('chat-llm')(`"${step.raw}" -> [${chatRes.commands.join(' ; ')}]`);
-                  }
-                  if (chatRes?.reply) {
-                    if (humanChain) outcomes.push(chatRes.reply);
-                    else reply(chatRes.reply);
-                  }
-                  const resolved = ctx.parseChatCommands(chatRes?.commands);
-                  if (chatRes?.reply || resolved.length > 0) {
-                    ctx.pushChatHistory('user', step.raw);
-                    ctx.pushChatHistory('assistant', chatRes?.reply || (chatRes?.commands ?? []).join('; '));
-                  }
-                  if (resolved.length > 0) {
-                    for (let j = 0; j < resolved.length; j++) {
-                      if (signal.aborted) break;
-                      const sub = resolved[j];
-                      try {
-                        await ctx.dispatchParsedCommand(sub, username, reply, signal, stepCtx);
-                      } catch (err) {
-                        if (err?.name === 'ReadinessBlocked') {
-                          chainDone = true;
-                          if (!err.hard) {
-                            const remainingSteps = [...resolved.slice(j), ...steps.slice(i + 1)];
-                            state.pendingBuild = null;
-                            state.pendingAction = {
-                              parsed: remainingSteps.length === 1 ? remainingSteps[0] : { type: 'chain', steps: remainingSteps },
-                              username,
-                              chatCtx: { userMessage: chatCtx?.userMessage ?? '', ignoreFood: true },
-                              expiresAt: Date.now() + 120000,
-                            };
-                          }
-                          await say(err.message, { kind: err.hard ? 'error' : 'prompt' });
-                          return;
-                        }
-                        throw err;
-                      }
-                    }
-                    continue;
-                  }
-                  if (chatRes?.reply) continue;
-                } catch (err) {
-                  errorFor('chat-llm', err.message);
-                }
+        for (let i = 0; i < steps.length; i++) {
+          if (signal.aborted) break;
+          const step = steps[i];
+          if (!step || step.type === 'unknown' || step.type === 'chain') continue;
+          try {
+            await ctx.dispatchParsedCommand(step, username, reply, signal, stepCtx);
+          } catch (err) {
+            if (err?.name === 'ReadinessBlocked') {
+              if (!err.hard) {
+                const remainingSteps = steps.slice(i);
+                state.pendingBuild = null;
+                state.pendingAction = {
+                  parsed: remainingSteps.length === 1 ? remainingSteps[0] : { type: 'chain', steps: remainingSteps },
+                  username,
+                  chatCtx: { userMessage: chatCtx?.userMessage ?? '', ignoreFood: true },
+                  expiresAt: Date.now() + 120000,
+                };
               }
-              if (llm?.apiKey && config.combat?.useCausality !== false) {
-                try {
-                  const classified = await classifyIntent(llm, step.raw);
-                  if (classified?.command) {
-                    logFor('jev-intent')(`"${step.raw}" -> ${classified.command.type} (${Math.round(classified.confidence * 100)}%)`);
-                    step = classified.command;
-                  }
-                } catch (err) {
-                  errorFor('jev-intent', err.message);
-                }
-              }
+              await say(err.message, { kind: err.hard ? 'error' : 'prompt' });
+              return;
             }
-            if (step.type === 'chain') continue;
-            try {
-              await ctx.dispatchParsedCommand(step, username, reply, signal, stepCtx);
-            } catch (err) {
-              if (err?.name === 'ReadinessBlocked') {
-                chainDone = true;
-                if (!err.hard) {
-                  const remainingSteps = steps.slice(i);
-                  state.pendingBuild = null;
-                  state.pendingAction = {
-                    parsed: remainingSteps.length === 1 ? remainingSteps[0] : { type: 'chain', steps: remainingSteps },
-                    username,
-                    chatCtx: { userMessage: chatCtx?.userMessage ?? '', ignoreFood: true },
-                    expiresAt: Date.now() + 120000,
-                  };
-                }
-                await say(err.message, { kind: err.hard ? 'error' : 'prompt' });
-                return;
-              }
-              throw err;
-            }
+            throw err;
           }
-          if (!signal.aborted) {
-            chainDone = true;
-            if (humanChain) {
-              const summaryRaw = outcomes.length > 0 ? outcomes.join('; ') : 'Đã làm xong hết yêu cầu.';
-              await ctx.replyHuman(summaryRaw, { userMessage: chatCtx?.userMessage ?? '', replyFn: reply });
-            } else {
-              reply('Đã hoàn thành chuỗi nhiệm vụ.');
-            }
-          }
-        } finally {
-          chainDone = true;
+        }
+        if (!signal.aborted && !chatCtx?.onOutcome) {
+          reply('Đã hoàn thành chuỗi nhiệm vụ.');
         }
       }, {
         onAbort: () => {
-          chainDone = true;
           bot.collectBlock?.cancelTask?.().catch?.(() => {});
           bot.stopDigging?.();
           bot.pathfinder?.setGoal?.(null);

@@ -1,65 +1,91 @@
-import {
-  GoalPlanResponseSchema,
-  InterpretChatResponseSchema,
-  buildGoalPlanPrompt,
-  buildHumanizePrompt,
-  buildInterpretChatPrompt,
-  cleanChatText,
-  normalizeAnswers,
-  parseJsonResponse,
-  resolvePlanOrder,
-} from './llm_prompts.js';
+const DEFAULT_JEV_BASE_URL = 'https://api.typesafe.ai';
 
-const DEFAULT_BASE_URLS = {
-  typesafe: 'https://api.typesafe.ai',
-  deepseek: 'https://api.deepseek.com',
-  openai: 'https://api.openai.com',
-  gemini: 'https://generativelanguage.googleapis.com',
-  openrouter: 'https://openrouter.ai/api/v1',
-  crowllm: 'https://crowllm.com/v1',
-  chatfree: 'https://api.xingchiapi.com',
-  ollama: 'http://127.0.0.1:11434',
-};
+export const COMBAT_QUESTIONS = Object.freeze({
+  tactic: {
+    type: 'choice',
+    instructions: 'Chọn chiến thuật combat phù hợp nhất hiện tại.',
+    criteria: {
+      melee: 'Tấn công cận chiến bằng kiếm/rìu khi ở gần và an toàn.',
+      shield: 'Giơ khiên chặn nguy hiểm, đặc biệt creeper ở gần (< 4 block) hoặc bị bắn xa.',
+      bow: 'Bắn cung từ khoảng cách xa (> 4 block) khi có cung và tên.',
+      retreat: 'Rút lui khi máu thấp hoặc bị đông quái bao vây.',
+      idle: 'Không hành động, quan sát.',
+    },
+  },
+  focus: {
+    type: 'choice',
+    instructions: 'Nên ưu tiên xử lý mối đe dọa nào trước?',
+    criteria: {
+      creeper: 'Creeper ở gần sắp nổ.',
+      ranged: 'Quái bắn xa như skeleton, pillager, blaze.',
+      hurting_owner: 'Quái đang đứng gần hoặc tấn công chủ nhân.',
+      closest: 'Quái đứng gần bot nhất.',
+    },
+  },
+  danger: {
+    type: 'score',
+    instructions: 'Đánh giá mức độ nguy hiểm hiện tại của bot.',
+    criteria: ['low', 'medium', 'high', 'critical'],
+  },
+  urgentRetreat: {
+    type: 'noul',
+    instructions: 'Tình huống có quá nguy hiểm đến mức phải rút lui ngay lập tức không?',
+    criteria: { true: 'Rất nguy hiểm, cần rút lui.', false: 'Vẫn kiểm soát được.' },
+  },
+});
 
-const OPENAI_COMPAT_PROVIDERS = new Set(['openai', 'deepseek', 'openrouter', 'crowllm', 'chatfree', 'ollama']);
+export const SURVIVAL_REACTION_QUESTIONS = Object.freeze({
+  action: {
+    type: 'choice',
+    instructions: 'Bot đang gặp nguy hiểm trong lúc làm việc, nên xử lý nhanh thế nào?',
+    criteria: {
+      continue: 'Tiếp tục tác vụ sau khi tự vệ xong.',
+      return_home: 'Hủy tác vụ hiện tại và rút về nhà an toàn.',
+      escalate_antigravity: 'Báo động khẩn để Antigravity lập kế hoạch lại.',
+    },
+  },
+  urgency: {
+    type: 'score',
+    instructions: 'Mức độ khẩn cấp của tình huống hiện tại.',
+    criteria: ['low', 'medium', 'high', 'critical'],
+  },
+  abortTask: {
+    type: 'noul',
+    instructions: 'Có cần hủy ngay tác vụ hiện tại để ưu tiên sinh tồn không?',
+    criteria: { true: 'Cần hủy tác vụ để bảo toàn mạng.', false: 'Không cần hủy.' },
+  },
+});
 
-function resolveBaseUrl(provider, baseUrl) {
-  const fallback = DEFAULT_BASE_URLS[provider] ?? DEFAULT_BASE_URLS.typesafe;
-  if (!baseUrl) return fallback;
-  if (provider !== 'typesafe' && baseUrl === DEFAULT_BASE_URLS.typesafe) {
-    return fallback;
-  }
-  return baseUrl;
-}
-
-export class LLMClient {
+export class JevClient {
   constructor({
-    provider = 'typesafe',
     model = 'jev-latest',
-    fallbackModels = [],
-    baseUrl,
+    baseUrl = DEFAULT_JEV_BASE_URL,
     apiKey,
     timeoutMs = 6000,
     maxRequestsPerMin = 0,
-    cacheTtlMs = 0,
   } = {}) {
-    this.provider = String(provider || 'typesafe').toLowerCase();
-    this.model = model;
-    this.fallbackModels = Array.isArray(fallbackModels)
-      ? [...new Set(fallbackModels.map(m => String(m ?? '').trim()).filter(m => m && m !== model))]
-      : [];
-    this.baseUrl = resolveBaseUrl(this.provider, baseUrl);
+    this.provider = 'typesafe';
+    this.model = model || 'jev-latest';
+    this.baseUrl = String(baseUrl || DEFAULT_JEV_BASE_URL).trim() || DEFAULT_JEV_BASE_URL;
     this.apiKey = apiKey;
-    this.timeoutMs = timeoutMs;
+    this.timeoutMs = Math.max(10, Number(timeoutMs) || 6000);
     this.maxRequestsPerMin = Math.max(0, Number(maxRequestsPerMin) || 0);
-    this.cacheTtlMs = Math.max(0, Number(cacheTtlMs) || 0);
     this._requestTimestamps = [];
-    this._responseCache = new Map();
-    this._stats = { requests: 0, cacheHits: 0, rateLimited: 0, fallbacks: 0, errors: 0 };
+    this._stats = { requests: 0, rateLimited: 0, errors: 0, totalLatencyMs: 0 };
+  }
+
+  isAvailable() {
+    return Boolean(this.apiKey);
   }
 
   stats() {
-    return { ...this._stats };
+    const completed = Math.max(1, this._stats.requests - this._stats.errors);
+    return {
+      requests: this._stats.requests,
+      rateLimited: this._stats.rateLimited,
+      errors: this._stats.errors,
+      avgLatencyMs: this._stats.requests > 0 ? Math.round(this._stats.totalLatencyMs / completed) : 0,
+    };
   }
 
   _checkRateLimit() {
@@ -70,60 +96,10 @@ export class LLMClient {
     }
     if (this.maxRequestsPerMin > 0 && this._requestTimestamps.length >= this.maxRequestsPerMin) {
       this._stats.rateLimited += 1;
-      throw new Error('LLM rate limit exceeded');
+      throw new Error('Jev rate limit exceeded');
     }
     this._requestTimestamps.push(now);
     this._stats.requests += 1;
-  }
-
-  async _withCache(cacheKey, fn) {
-    if (!(this.cacheTtlMs > 0)) return fn();
-    const now = Date.now();
-    const hit = this._responseCache.get(cacheKey);
-    if (hit && now - hit.at < this.cacheTtlMs) {
-      this._stats.cacheHits += 1;
-      return hit.value;
-    }
-    const value = await fn();
-    if (this._responseCache.size >= 64) {
-      const oldestKey = this._responseCache.keys().next().value;
-      this._responseCache.delete(oldestKey);
-    }
-    this._responseCache.set(cacheKey, { value, at: Date.now() });
-    return value;
-  }
-
-  _candidateModels() {
-    return [this.model, ...this.fallbackModels].filter(Boolean);
-  }
-
-  async _withModelFallback(signal, runForModel) {
-    const candidates = this._candidateModels();
-    if (signal?.aborted) {
-      throw signal.reason ?? new Error('LLM aborted');
-    }
-    this._checkRateLimit();
-    let lastErr = null;
-    for (let i = 0; i < candidates.length; i++) {
-      if (signal?.aborted) {
-        throw signal.reason ?? new Error('LLM aborted');
-      }
-      if (i > 0) this._stats.fallbacks += 1;
-      try {
-        return await runForModel(candidates[i]);
-      } catch (err) {
-        lastErr = err;
-        if (signal?.aborted || i === candidates.length - 1) {
-          this._stats.errors += 1;
-          throw err;
-        }
-      }
-    }
-    throw lastErr ?? new Error('No LLM model configured');
-  }
-
-  isAvailable() {
-    return this.provider === 'ollama' || Boolean(this.apiKey);
   }
 
   async _fetchJson(url, options, signal, timeoutMs) {
@@ -133,12 +109,12 @@ export class LLMClient {
       if (signal.aborted) controller.abort(signal.reason);
       else signal.addEventListener('abort', onAbort, { once: true });
     }
-    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(new Error('LLM timeout')), timeoutMs) : null;
+    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(new Error('Jev timeout')), timeoutMs) : null;
     timer?.unref?.();
 
     let onControllerAbort = null;
     const abortRace = new Promise((_, reject) => {
-      onControllerAbort = () => reject(controller.signal.reason ?? new Error('LLM timeout'));
+      onControllerAbort = () => reject(controller.signal.reason ?? new Error('Jev timeout'));
       if (controller.signal.aborted) {
         onControllerAbort();
       } else {
@@ -151,7 +127,7 @@ export class LLMClient {
       const res = await fetch(url, { ...options, signal: controller.signal });
       if (!res.ok) {
         const text = await Promise.race([res.text(), abortRace]).catch(() => '');
-        throw new Error(`LLM ${res.status}: ${text}`);
+        throw new Error(`Jev ${res.status}: ${text}`);
       }
       const jsonPromise = res.json();
       jsonPromise.catch(() => {});
@@ -163,213 +139,68 @@ export class LLMClient {
     }
   }
 
-  async ask({ state, questions, signal, timeoutMs = this.timeoutMs }) {
-    if (this.provider === 'typesafe') {
-      const url = new URL('/v1/systemone', this.baseUrl).toString();
-      const headers = { 'Content-Type': 'application/json' };
-      if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
-      return this._withModelFallback(signal, (candidateModel) =>
-        this._fetchJson(
-          url,
-          { method: 'POST', headers, body: JSON.stringify({ model: candidateModel, state, questions }) },
-          signal,
-          timeoutMs
-        )
+  async ask({ state, questions, signal, timeoutMs = this.timeoutMs } = {}) {
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error('Jev aborted');
+    }
+    this._checkRateLimit();
+    const startedAt = Date.now();
+    const url = new URL('/v1/systemone', this.baseUrl).toString();
+    const headers = { 'Content-Type': 'application/json' };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    try {
+      const data = await this._fetchJson(
+        url,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ model: this.model, state, questions }),
+        },
+        signal,
+        timeoutMs
       );
+      this._stats.totalLatencyMs += Date.now() - startedAt;
+      return data;
+    } catch (err) {
+      this._stats.errors += 1;
+      throw err;
     }
-    return this._askViaChatCompletion({ state, questions, signal, timeoutMs });
   }
 
-  async _completeJsonPrompt(prompt, signal, timeoutMs = this.timeoutMs, { temperature = 0 } = {}) {
-    const base = this.baseUrl.replace(/\/+$/, '');
-
-    if (this.provider === 'gemini') {
-      return this._withModelFallback(signal, async (candidateModel) => {
-        const url = `${base}/v1beta/models/${encodeURIComponent(candidateModel)}:generateContent?key=${encodeURIComponent(this.apiKey ?? '')}`;
-        const data = await this._fetchJson(
-          url,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }],
-              generationConfig: { responseMimeType: 'application/json', temperature },
-            }),
-          },
-          signal,
-          timeoutMs
-        );
-        const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (typeof rawText !== 'string' || !rawText.trim()) {
-          throw new SyntaxError('Empty JSON response from LLM');
-        }
-        return { model: candidateModel, parsed: parseJsonResponse(rawText) };
-      });
-    }
-
-    if (OPENAI_COMPAT_PROVIDERS.has(this.provider)) {
-      const url = base.endsWith('/v1') ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
-      const headers = { 'Content-Type': 'application/json' };
-      if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
-      return this._withModelFallback(signal, async (candidateModel) => {
-        const bodyObj = {
-          model: candidateModel,
-          messages: [{ role: 'user', content: prompt }],
-          temperature,
-        };
-        if (this.provider !== 'openrouter' && this.provider !== 'crowllm') {
-          bodyObj.response_format = { type: 'json_object' };
-        }
-        const data = await this._fetchJson(
-          url,
-          {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(bodyObj),
-          },
-          signal,
-          timeoutMs
-        );
-        const rawText = data?.choices?.[0]?.message?.content;
-        if (typeof rawText !== 'string' || !rawText.trim()) {
-          throw new SyntaxError('Empty JSON response from LLM');
-        }
-        return { model: data?.model ?? candidateModel, parsed: parseJsonResponse(rawText) };
-      });
-    }
-
-    throw new Error(`Unsupported LLM provider: ${this.provider}`);
-  }
-
-  async _completeTextPrompt(prompt, signal, timeoutMs = this.timeoutMs, { temperature = 0.75, maxTokens = 140 } = {}) {
-    const base = this.baseUrl.replace(/\/+$/, '');
-
-    if (this.provider === 'gemini') {
-      return this._withModelFallback(signal, async (candidateModel) => {
-        const url = `${base}/v1beta/models/${encodeURIComponent(candidateModel)}:generateContent?key=${encodeURIComponent(this.apiKey ?? '')}`;
-        const data = await this._fetchJson(
-          url,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }],
-              generationConfig: { temperature, maxOutputTokens: maxTokens },
-            }),
-          },
-          signal,
-          timeoutMs
-        );
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-        if (!String(text).trim()) {
-          throw new Error('Empty text response from LLM');
-        }
-        return { model: candidateModel, text };
-      });
-    }
-
-    if (OPENAI_COMPAT_PROVIDERS.has(this.provider)) {
-      const url = base.endsWith('/v1') ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
-      const headers = { 'Content-Type': 'application/json' };
-      if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
-      const effectiveMaxTokens = this.provider === 'crowllm' ? Math.max(maxTokens, 512) : maxTokens;
-      return this._withModelFallback(signal, async (candidateModel) => {
-        const data = await this._fetchJson(
-          url,
-          {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              model: candidateModel,
-              messages: [{ role: 'user', content: prompt }],
-              temperature,
-              max_tokens: effectiveMaxTokens,
-            }),
-          },
-          signal,
-          timeoutMs
-        );
-        const text = data?.choices?.[0]?.message?.content ?? '';
-        if (!String(text).trim()) {
-          throw new Error('Empty text response from LLM');
-        }
-        return { model: data?.model ?? candidateModel, text };
-      });
-    }
-
-    throw new Error(`Unsupported LLM provider: ${this.provider}`);
-  }
-
-  async _askViaChatCompletion({ state, questions, signal, timeoutMs }) {
-    const prompt = [
-      'You are a fast Minecraft companion decision engine. Evaluate the given state and answer every question.',
-      'Return ONLY a valid JSON object with shape {"answers": {<key>: ...}}:',
-      '- For type "choice": {"type":"choice","choice":"<exact criteria key>","confidence":0.0..1.0}',
-      '- For type "score": {"type":"score","score":0..<criteria.length-1>,"confidence":0.0..1.0}',
-      '- For type "noul": {"type":"noul","noul":0.0..1.0}',
-      `State: ${JSON.stringify(state)}`,
-      `Questions: ${JSON.stringify(questions)}`,
-    ].join('\n');
-
-    const { model, parsed } = await this._completeJsonPrompt(prompt, signal, timeoutMs);
-    return { model, answers: normalizeAnswers(parsed, questions) };
-  }
-
-  async interpretChat({ message, botState = {}, history = [], signal, timeoutMs = Math.max(this.timeoutMs, 12000) }) {
-    if (this.provider === 'typesafe') {
-      throw new Error('Jev (typesafe) là model so sánh xác suất System 1, không dùng để sinh ngôn ngữ tự nhiên System 2.');
-    }
-
-    const prompt = buildInterpretChatPrompt({ message, botState, history });
-    return this._withCache(`chat:${prompt}`, async () => {
-      const { model, parsed } = await this._completeJsonPrompt(prompt, signal, timeoutMs, { temperature: 0.7 });
-      const checked = InterpretChatResponseSchema.safeParse(parsed);
-      const data = checked.success ? checked.data : (parsed && typeof parsed === 'object' ? parsed : {});
-      const reply = typeof data?.reply === 'string'
-        ? cleanChatText(data.reply, 480)
-        : '';
-      let commands = Array.isArray(data?.commands)
-        ? data.commands.map(c => String(c ?? '').trim()).filter(c => c && !/[<>]/.test(c)).slice(0, 5)
-        : [];
-      if (commands.length === 0 && Array.isArray(data?.plan) && data.plan.length > 0) {
-        commands = resolvePlanOrder(data.plan, { maxSteps: 5 }).map(s => s.command);
-      }
-      return { model, reply, commands };
+  async chooseCombat(jevState, { signal, timeoutMs } = {}) {
+    const res = await this.ask({
+      state: jevState,
+      questions: COMBAT_QUESTIONS,
+      signal,
+      timeoutMs,
     });
-  }
-
-  async planGoal({ goal, botState = {}, memoryContext = {}, signal, timeoutMs = Math.max(this.timeoutMs, 12000) } = {}) {
-    if (this.provider === 'typesafe') {
-      throw new Error('Jev (typesafe) là model so sánh xác suất System 1, không dùng để lập kế hoạch System 2.');
-    }
-    const prompt = buildGoalPlanPrompt({ goal, botState, memoryContext });
-    const { model, parsed } = await this._completeJsonPrompt(prompt, signal, timeoutMs, { temperature: 0.2 });
-    const validated = GoalPlanResponseSchema.parse(parsed);
-    const steps = resolvePlanOrder(validated.plan, { maxSteps: 8 });
     return {
-      model,
-      reply: cleanChatText(validated.reply ?? '', 220),
-      steps,
-      commands: steps.map(s => s.command),
+      action: res?.answers?.tactic?.choice ?? 'melee',
+      confidence: res?.answers?.tactic?.confidence ?? null,
+      probabilities: res?.answers?.tactic?.probabilities ?? null,
+      focus: res?.answers?.focus?.choice ?? null,
+      danger: res?.answers?.danger?.score ?? null,
+      urgentRetreat: res?.answers?.urgentRetreat?.noul ?? null,
     };
   }
 
-  async humanizeReply({ userMessage = '', rawEvent = '', botState = {}, history = [], signal, timeoutMs } = {}) {
-    if (this.provider === 'typesafe') {
-      throw new Error('Jev (typesafe) là model so sánh xác suất System 1, không dùng để sinh ngôn ngữ tự nhiên System 2.');
-    }
-
-    const effectiveTimeoutMs = timeoutMs ?? (this.provider === 'crowllm' ? Math.max(this.timeoutMs, 10000) : 6000);
-    const prompt = buildHumanizePrompt({ userMessage, rawEvent, botState, history });
-    return this._withCache(`human:${prompt}`, async () => {
-      const { model, text } = await this._completeTextPrompt(prompt, signal, effectiveTimeoutMs, {
-        temperature: 0.75,
-        maxTokens: 140,
-      });
-      return { model, reply: cleanChatText(text, 220) };
+  async chooseSurvivalAction(situation, { signal, timeoutMs } = {}) {
+    const res = await this.ask({
+      state: situation,
+      questions: SURVIVAL_REACTION_QUESTIONS,
+      signal,
+      timeoutMs,
     });
+    return {
+      action: res?.answers?.action?.choice ?? 'continue',
+      confidence: res?.answers?.action?.confidence ?? null,
+      urgency: res?.answers?.urgency?.score ?? null,
+      abortTask: res?.answers?.abortTask?.noul ?? null,
+    };
   }
 }
+
+export { JevClient as LLMClient };
 
 export function plannerPrompt(state, questions) {
   return {
@@ -378,3 +209,5 @@ export function plannerPrompt(state, questions) {
     questions,
   };
 }
+
+export default JevClient;

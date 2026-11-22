@@ -16,17 +16,6 @@ export const DEFAULT_CONFIG = {
     apiKeyEnv: 'TYPESAFE_API_KEY',
     jevIntervalMs: 4000,
   },
-  chat: {
-    enabled: true,
-    humanReply: true,
-    mcpChat: false,
-    provider: 'crowllm',
-    model: 'particle-1:free',
-    fallbackModels: ['grok-4.7-fast:free'],
-    baseUrl: 'https://crowllm.com/v1',
-    apiKeyEnv: 'CROWLLM_API_KEY',
-    maxRequestsPerMin: 30,
-  },
   combat: {
     enabled: true,
     defendOwner: true,
@@ -58,7 +47,7 @@ export const DEFAULT_CONFIG = {
     minFoodPoints: 20,
   },
   dashboard: {
-    enabled: false,
+    enabled: true,
     host: '127.0.0.1',
     port: 3000,
   },
@@ -75,23 +64,12 @@ const ConfigSchema = z.object({
   llm: z.object({
     provider: z.string().optional(),
     model: z.string().min(1),
-    fallbackModels: z.array(z.string().min(1)).optional(),
     baseUrl: z.string().url().or(z.literal('')).optional(),
     apiKeyEnv: z.string().optional(),
     jevIntervalMs: z.number().int().positive(),
+    timeoutMs: z.number().int().positive().optional(),
     maxRequestsPerMin: z.number().int().nonnegative().optional(),
   }),
-  chat: z.object({
-    enabled: z.boolean().optional(),
-    humanReply: z.boolean().optional(),
-    mcpChat: z.boolean().optional(),
-    provider: z.string().optional(),
-    model: z.string().min(1),
-    fallbackModels: z.array(z.string().min(1)).optional(),
-    baseUrl: z.string().url().or(z.literal('')).optional(),
-    apiKeyEnv: z.string().optional(),
-    maxRequestsPerMin: z.number().int().nonnegative().optional(),
-  }).optional(),
   combat: z.object({
     enabled: z.boolean(),
     defendOwner: z.boolean(),
@@ -161,15 +139,6 @@ export function loadConfig(configPath = 'config.json', { env = process.env } = {
   }
 
   const merged = deepMerge(DEFAULT_CONFIG, parsed);
-
-  if (parsed?.chat?.provider && String(parsed.chat.provider).trim().toLowerCase() !== DEFAULT_CONFIG.chat.provider) {
-    if (parsed.chat.fallbackModels === undefined) merged.chat.fallbackModels = [];
-    if (parsed.chat.baseUrl === undefined) merged.chat.baseUrl = undefined;
-    if (parsed.chat.apiKeyEnv === undefined) merged.chat.apiKeyEnv = undefined;
-  }
-  if (parsed?.llm?.provider && String(parsed.llm.provider).trim().toLowerCase() !== DEFAULT_CONFIG.llm.provider) {
-    if (parsed.llm.fallbackModels === undefined) merged.llm.fallbackModels = [];
-  }
 
   if (env) {
     merged.dashboard = merged.dashboard ?? { ...DEFAULT_CONFIG.dashboard };

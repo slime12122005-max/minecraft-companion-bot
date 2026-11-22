@@ -27,7 +27,8 @@ export class DashboardServer {
     getInbox = null,
     onSay = null,
     onMacro = null,
-    onMcpActivity = null,
+    onPlanExecute = null,
+    onSmelt = null,
     sseIntervalMs = 250,
     log = () => {},
   } = {}) {
@@ -43,7 +44,8 @@ export class DashboardServer {
     this.getInbox = getInbox;
     this.onSay = onSay;
     this.onMacro = onMacro;
-    this.onMcpActivity = onMcpActivity;
+    this.onPlanExecute = onPlanExecute;
+    this.onSmelt = onSmelt;
     this.sseIntervalMs = Math.max(50, Number(sseIntervalMs) || 250);
     this.log = log;
     this.server = null;
@@ -54,10 +56,6 @@ export class DashboardServer {
   _isLoopbackHost(host) {
     const h = String(host ?? '').trim().toLowerCase();
     return h === '127.0.0.1' || h === 'localhost' || h === '::1';
-  }
-
-  _isMcpRequest(req) {
-    return String(req?.headers?.['x-mcp-client'] ?? '').trim() === '1';
   }
 
   _extractToken(req, url) {
@@ -222,7 +220,6 @@ export class DashboardServer {
         if (this.authToken && !this._hasValidToken(req, url)) {
           return this._sendJson(res, 401, { ok: false, error: 'Unauthorized' });
         }
-        try { this.onMcpActivity?.(); } catch {}
         const rawSince = Number(url.searchParams.get('sinceId'));
         const sinceId = Number.isInteger(rawSince) && rawSince >= 0 ? rawSince : 0;
         const rawLimit = Number(url.searchParams.get('limit'));
@@ -307,7 +304,6 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
-          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const cmd = String(body.command ?? '').trim().slice(0, 500);
           if (!cmd) return this._sendJson(res, 400, { ok: false, error: 'command required' });
@@ -326,7 +322,6 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
-          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const message = String(body.message ?? '').trim().slice(0, 500);
           if (!message) return this._sendJson(res, 400, { ok: false, error: 'message required' });
@@ -352,7 +347,6 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
-          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const action = String(body.action ?? '').trim();
           if (!VALID_CONTROLS.has(action)) {
@@ -370,7 +364,6 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
-          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const action = String(body.action ?? '').trim();
           const itemName = String(body.itemName ?? '').trim().slice(0, 120);
@@ -390,7 +383,6 @@ export class DashboardServer {
         const auth = this._isAuthorizedPost(req, url);
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
-          if (this._isMcpRequest(req)) this.onMcpActivity?.();
           const body = await this._readJsonBody(req);
           const macro = String(body.macro ?? '').trim();
           const wait = body.wait !== false;
@@ -404,6 +396,61 @@ export class DashboardServer {
             return this._sendJson(res, result.status, {
               ok: false,
               error: result.error ?? 'Macro failed',
+              ...result,
+            });
+          }
+          this.broadcast();
+          return this._sendJson(res, 200, { ok: true, ...(result && typeof result === 'object' ? result : {}) });
+        } catch (err) {
+          return this._sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+        }
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/plan') {
+        const auth = this._isAuthorizedPost(req, url);
+        if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
+        try {
+          const body = await this._readJsonBody(req);
+          const goal = String(body.goal ?? '').trim().slice(0, 300);
+          const steps = body.steps;
+          const onDanger = body.onDanger === 'abort_and_notify' ? 'abort_and_notify' : 'pause_and_resume';
+          const wait = body.wait !== false;
+          if (!Array.isArray(steps) || steps.length === 0) {
+            return this._sendJson(res, 400, { ok: false, error: 'steps array required' });
+          }
+          const result = this.onPlanExecute
+            ? await this.onPlanExecute({ goal, steps, onDanger, wait })
+            : { ok: false, status: 503, error: 'Plan executor chưa sẵn sàng' };
+          if (result?.ok === false && result?.status) {
+            return this._sendJson(res, result.status, {
+              ok: false,
+              error: result.error ?? 'Plan failed',
+              ...result,
+            });
+          }
+          this.broadcast();
+          return this._sendJson(res, 200, { ok: true, ...(result && typeof result === 'object' ? result : {}) });
+        } catch (err) {
+          return this._sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+        }
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/smelt') {
+        const auth = this._isAuthorizedPost(req, url);
+        if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
+        try {
+          const body = await this._readJsonBody(req);
+          const action = String(body.action ?? 'status').trim();
+          const target = String(body.target ?? '').trim().slice(0, 120);
+          const count = body.count != null ? Number(body.count) : 1;
+          const force = Boolean(body.force);
+          const result = this.onSmelt
+            ? await this.onSmelt({ action, target, count, force })
+            : { ok: false, status: 503, error: 'Smelting manager chưa sẵn sàng' };
+          if (result?.ok === false && result?.status) {
+            return this._sendJson(res, result.status, {
+              ok: false,
+              error: result.error ?? 'Smelt failed',
               ...result,
             });
           }

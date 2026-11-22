@@ -206,8 +206,8 @@ export const TOOLS = [
         },
         waitFor: {
           type: 'string',
-          enum: ['task_done', 'inbox', 'any'],
-          description: 'Loại sự kiện muốn đợi (mặc định any).',
+          enum: ['task_done', 'inbox', 'alert', 'any'],
+          description: 'Loại sự kiện muốn đợi (mặc định any; dùng alert để bắt cảnh báo nguy hiểm từ Jev/hệ thống).',
         },
         sinceInboxId: {
           type: 'integer',
@@ -243,6 +243,82 @@ export const TOOLS = [
         },
       },
       required: ['macro'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'mc_plan_execute',
+    description: 'Antigravity lập kế hoạch và phân chia thành chuỗi bước (command / macro / smelt / say) để bot thực thi tuần tự.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        goal: {
+          type: 'string',
+          description: 'Mục tiêu tổng thể của kế hoạch (vd: đi đào 20 sắt và cất kho).',
+        },
+        steps: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 10,
+          description: 'Danh sách các bước tuần tự.',
+          items: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['command', 'macro', 'smelt', 'say'] },
+              command: { type: 'string' },
+              macro: { type: 'string', enum: ['prepare_caving_kit', 'deposit_mining_loot'] },
+              action: { type: 'string', enum: ['start', 'collect'] },
+              target: { type: 'string' },
+              count: { type: 'integer', minimum: 1 },
+              force: { type: 'boolean' },
+              message: { type: 'string' },
+              whisperTo: { type: 'string' },
+            },
+            required: ['type'],
+            additionalProperties: false,
+          },
+        },
+        onDanger: {
+          type: 'string',
+          enum: ['pause_and_resume', 'abort_and_notify'],
+          description: 'Hành xử khi gặp nguy hiểm: tạm dừng để Jev tự vệ rồi làm tiếp, hoặc hủy và báo về Antigravity.',
+        },
+        wait: {
+          type: 'boolean',
+          description: 'Chờ thực thi xong toàn bộ kế hoạch (mặc định true; đặt false để nhận ACCEPTED ngay và theo dõi qua mc_wait_event).',
+        },
+      },
+      required: ['steps'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'mc_smelt',
+    description: 'Điều khiển lò nung bất đồng bộ: nạp phôi vào lò (start), thu hoạch thành phẩm (collect), hoặc xem các lò đang nung (status).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['start', 'collect', 'status'],
+          description: 'Thao tác lò nung.',
+        },
+        target: {
+          type: 'string',
+          description: 'Tên nguyên liệu cần nung khi action=start (vd: sắt, vàng, thịt, cát).',
+        },
+        count: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 64,
+          description: 'Số lượng cần nạp khi action=start (mặc định 1).',
+        },
+        force: {
+          type: 'boolean',
+          description: 'Khi action=collect: ép thu lò ngay cả khi chưa hết thời gian dự kiến.',
+        },
+      },
+      required: ['action'],
       additionalProperties: false,
     },
   },
@@ -304,9 +380,7 @@ export function createMcpHandler({
   const pollMs = Math.max(10, Number(pollIntervalMs) || 1000);
 
   async function requestJson(endpoint, { method = 'GET', body = undefined } = {}) {
-    const headers = {
-      'X-Mcp-Client': '1',
-    };
+    const headers = {};
     if (authToken) {
       headers.Authorization = `Bearer ${authToken}`;
     }
@@ -431,7 +505,7 @@ export function createMcpHandler({
         const timeoutSec = input.timeoutSec == null
           ? 15
           : Math.max(1, Math.min(45, Number(input.timeoutSec) || 15));
-        const waitFor = ['task_done', 'inbox', 'any'].includes(input.waitFor)
+        const waitFor = ['task_done', 'inbox', 'alert', 'any'].includes(input.waitFor)
           ? input.waitFor
           : 'any';
         const ownerOnly = input.ownerOnly !== false;
@@ -448,9 +522,18 @@ export function createMcpHandler({
           ? Number(input.sinceInboxId)
           : (initInbox.latestId ?? 0);
 
-        if ((waitFor === 'inbox' || waitFor === 'any') && (initInbox.latestId ?? 0) > baselineInboxId) {
+        if ((waitFor === 'inbox' || waitFor === 'alert' || waitFor === 'any') && (initInbox.latestId ?? 0) > baselineInboxId) {
           const relevantInit = filterInboxMessages(initInbox.messages, { ownerOnly, unhandledOnly });
-          if (relevantInit.length > 0) {
+          const alertsInit = relevantInit.filter(m => m.kind === 'alert');
+          if (alertsInit.length > 0 && (waitFor === 'alert' || waitFor === 'any')) {
+            return {
+              reason: 'alert',
+              latestInboxId: initInbox.latestId ?? baselineInboxId,
+              newMessages: alertsInit,
+              state: compactState(initState),
+            };
+          }
+          if (waitFor !== 'alert' && relevantInit.length > 0) {
             return {
               reason: 'new_inbox',
               latestInboxId: initInbox.latestId ?? baselineInboxId,
@@ -486,9 +569,18 @@ export function createMcpHandler({
           latestState = st;
           latestInbox = inb;
 
-          if ((waitFor === 'inbox' || waitFor === 'any') && (inb.latestId ?? 0) > baselineInboxId) {
+          if ((waitFor === 'inbox' || waitFor === 'alert' || waitFor === 'any') && (inb.latestId ?? 0) > baselineInboxId) {
             const relevant = filterInboxMessages(inb.messages, { ownerOnly, unhandledOnly });
-            if (relevant.length > 0) {
+            const alerts = relevant.filter(m => m.kind === 'alert');
+            if (alerts.length > 0 && (waitFor === 'alert' || waitFor === 'any')) {
+              return {
+                reason: 'alert',
+                latestInboxId: inb.latestId ?? baselineInboxId,
+                newMessages: alerts,
+                state: compactState(st),
+              };
+            }
+            if (waitFor !== 'alert' && relevant.length > 0) {
               return {
                 reason: 'new_inbox',
                 latestInboxId: inb.latestId ?? baselineInboxId,
@@ -546,6 +638,28 @@ export function createMcpHandler({
           method: 'POST',
           body: { macro, wait },
         });
+      }
+
+      case 'mc_plan_execute': {
+        if (!Array.isArray(input.steps) || input.steps.length === 0) {
+          throw new Error('Thiếu danh sách steps');
+        }
+        const body = {
+          goal: String(input.goal ?? '').trim(),
+          steps: input.steps,
+          onDanger: input.onDanger === 'abort_and_notify' ? 'abort_and_notify' : 'pause_and_resume',
+          wait: input.wait !== false,
+        };
+        return await requestJson('/api/plan', { method: 'POST', body });
+      }
+
+      case 'mc_smelt': {
+        const action = String(input.action ?? 'status').trim();
+        const body = { action };
+        if (input.target != null) body.target = String(input.target).trim();
+        if (input.count != null) body.count = Number(input.count);
+        if (input.force != null) body.force = Boolean(input.force);
+        return await requestJson('/api/smelt', { method: 'POST', body });
       }
 
       default:

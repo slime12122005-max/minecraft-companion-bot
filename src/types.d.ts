@@ -1,20 +1,11 @@
 export interface LLMConfig {
   provider?: string;
   model: string;
-  fallbackModels?: string[];
   baseUrl?: string;
   apiKeyEnv?: string;
   jevIntervalMs: number;
-}
-
-export interface ChatConfig {
-  enabled?: boolean;
-  humanReply?: boolean;
-  provider?: string;
-  model: string;
-  fallbackModels?: string[];
-  baseUrl?: string;
-  apiKeyEnv?: string;
+  timeoutMs?: number;
+  maxRequestsPerMin?: number;
 }
 
 export interface BotConfig {
@@ -26,7 +17,6 @@ export interface BotConfig {
   };
   owner: string;
   llm: LLMConfig;
-  chat?: ChatConfig;
   combat: {
     enabled: boolean;
     defendOwner: boolean;
