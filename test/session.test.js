@@ -1220,3 +1220,80 @@ test('session cleanup detaches bot listeners, loop guards equipment/emergencyHea
     await session.cleanup();
   }
 });
+
+test('session honors home.setOnCommand false and building.confirmTerrainChange false config flags', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-cfg-flags-'));
+  const bpFile = path.join(dir, 'tiny.json');
+  try {
+    await fs.writeFile(bpFile, JSON.stringify({
+      size: [1, 1, 1],
+      blocks: [{ x: 0, y: 0, z: 0, name: 'oak_planks' }],
+    }));
+
+    const world = new Map([
+      ['2,63,2', { name: 'stone', position: pos(2, 63, 2) }],
+      ['2,64,2', { name: 'short_grass', position: pos(2, 64, 2) }],
+    ]);
+
+    const fakeBot = makeFakeBot();
+    fakeBot.entity.position = pos(0, 64, 0);
+    fakeBot.inventory.items = () => [{ name: 'oak_planks', count: 4 }];
+    fakeBot.blockAt = (p) => {
+      const f = typeof p.floored === 'function' ? p.floored() : pos(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+      return world.get(`${f.x},${f.y},${f.z}`) ?? { name: 'air', position: f };
+    };
+    fakeBot.dig = async (b) => {
+      const p = b.position;
+      world.delete(`${p.x},${p.y},${p.z}`);
+    };
+    fakeBot.placeBlock = async (refBlock, face) => {
+      const placedPos = refBlock.position.plus(face);
+      world.set(`${placedPos.x},${placedPos.y},${placedPos.z}`, { name: 'oak_planks', position: placedPos });
+    };
+
+    const memory = new Memory({ autoSaveMs: 0 });
+    const existingHome = { x: 100, y: 64, z: -50, dimension: 'overworld', setAt: 1 };
+    memory.set('home', existingHome);
+
+    const session = createBotSession({
+      ...DEFAULT_CONFIG,
+      home: { ...DEFAULT_CONFIG.home, setOnCommand: false },
+      building: { ...DEFAULT_CONFIG.building, confirmTerrainChange: false },
+    }, {
+      llm: {},
+      memory,
+      tasks: new TaskCoordinator({ log: () => {} }),
+      router: new CommandRouter(),
+      createBotFn: () => fakeBot,
+      loadPlugins: false,
+    });
+
+    try {
+      // 1) home.setOnCommand === false refuses overwriting saved home
+      await session.onCommand('đây là nhà');
+      assert.deepEqual(memory.get('home'), existingHome);
+      assert.ok(fakeBot._chats.some(c => c.includes('không cho phép đặt nhà bằng lệnh')));
+
+      // 2) building.confirmTerrainChange === false prepares immediately without needing "xác nhận"
+      fakeBot._chats.length = 0;
+      await session.onCommand(`dọn mặt bằng ${bpFile}`);
+      await new Promise(r => setTimeout(r, 40));
+      assert.equal(world.get('2,64,2'), undefined);
+      assert.equal(session.builder.config.confirmTerrainChange, false);
+      assert.ok(fakeBot._chats.some(c => c.includes('Đã dọn mặt bằng xong')));
+      assert.ok(!fakeBot._chats.some(c => c.includes('Gõ "xác nhận"')));
+
+      // 3) building.confirmTerrainChange === false builds immediately without needing "xác nhận"
+      fakeBot._chats.length = 0;
+      await session.onCommand(`xây ${bpFile}`);
+      await new Promise(r => setTimeout(r, 40));
+      assert.equal(world.get('2,64,2')?.name, 'oak_planks');
+      assert.ok(fakeBot._chats.some(c => c.includes('Đã xây xong 1/1 block')));
+      assert.ok(!fakeBot._chats.some(c => c.includes('Gõ "xác nhận"')));
+    } finally {
+      await session.cleanup();
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

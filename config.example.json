@@ -11,25 +11,32 @@
     "model": "jev-latest",
     "baseUrl": "https://api.typesafe.ai",
     "apiKeyEnv": "TYPESAFE_API_KEY",
-    "jevIntervalMs": 2000
+    "jevIntervalMs": 2000,
+    "timeoutMs": 2500,
+    "maxRequestsPerMin": 30
   },
   "combat": {
     "enabled": true,
     "defendOwner": true,
     "radius": 16,
+    "maxVerticalDistance": 5,
     "retreatHealth": 8,
     "crit": true,
     "bow": true,
     "shieldAgainstCreeper": true,
-    "useCausality": true
+    "useCausality": true,
+    "useThreatScore": true,
+    "minConfidence": 0.3
   },
   "inventory": {
-    "blockStacks": 1,
+    "blockStacks": 2,
     "keepFood": 16,
     "discardObsolete": false
   },
   "building": {
     "confirmTerrainChange": true,
+    "autoScaffold": true,
+    "maxPrepareBlocks": 1000,
     "maxBlocksPerSession": 5000,
     "keepWater": false
   },

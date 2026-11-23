@@ -10,6 +10,8 @@ services:
     env_file:
       - path: .env
         required: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
-      - ./config.json:/app/config.json:ro
+      - ./config.json:/app/config.json

@@ -187,3 +187,98 @@ test('loadConfig applies DASHBOARD_ENABLED, DASHBOARD_HOST, DASHBOARD_PORT, and 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('loadConfig preserves extended building, combat, and humanizer options without Zod stripping', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-cfg-ext-'));
+  const file = path.join(dir, 'config.json');
+  try {
+    await fs.writeFile(file, JSON.stringify({
+      combat: {
+        maxVerticalDistance: 8,
+        useThreatScore: false,
+        alwaysUseJev: true,
+      },
+      building: {
+        autoScaffold: false,
+        maxPrepareBlocks: 2500,
+        maxBlocks: 75000,
+        maxSchematicBytes: 16777216,
+        maxPlacementAttempts: 6000,
+      },
+      humanizer: {
+        lookSteps: 7,
+        lookStepMs: 18,
+        lookJitterRad: 0.015,
+        gestureStepMs: 90,
+        strafeDurationMs: 250,
+        strafeCooldownMs: 500,
+        preserveTestDelays: true,
+      },
+    }));
+    const cfg = loadConfig(file);
+    assert.equal(cfg.combat.maxVerticalDistance, 8);
+    assert.equal(cfg.combat.useThreatScore, false);
+    assert.equal(cfg.combat.alwaysUseJev, true);
+    assert.equal(cfg.building.autoScaffold, false);
+    assert.equal(cfg.building.maxPrepareBlocks, 2500);
+    assert.equal(cfg.building.maxBlocks, 75000);
+    assert.equal(cfg.building.maxSchematicBytes, 16777216);
+    assert.equal(cfg.building.maxPlacementAttempts, 6000);
+    assert.equal(cfg.humanizer.lookSteps, 7);
+    assert.equal(cfg.humanizer.lookStepMs, 18);
+    assert.equal(cfg.humanizer.lookJitterRad, 0.015);
+    assert.equal(cfg.humanizer.gestureStepMs, 90);
+    assert.equal(cfg.humanizer.strafeDurationMs, 250);
+    assert.equal(cfg.humanizer.strafeCooldownMs, 500);
+    assert.equal(cfg.humanizer.preserveTestDelays, true);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig applies MINECRAFT_* env overrides and ignores invalid ports', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bot-cfg-mc-env-'));
+  const file = path.join(dir, 'config.json');
+  try {
+    await fs.writeFile(file, JSON.stringify({
+      minecraft: { host: 'localhost', port: 25565, username: 'old_bot', version: '1.21.1' },
+      owner: 'old_owner',
+    }));
+    const cfg = loadConfig(file, {
+      env: {
+        MINECRAFT_HOST: 'host.docker.internal',
+        MINECRAFT_PORT: '55123',
+        MINECRAFT_USERNAME: 'companion_bot_123456',
+        MINECRAFT_VERSION: '1.21.4',
+        MINECRAFT_OWNER: 'owner_name_12345678',
+      },
+    });
+    assert.equal(cfg.minecraft.host, 'host.docker.internal');
+    assert.equal(cfg.minecraft.port, 55123);
+    assert.equal(cfg.minecraft.username, 'companion_bot_12');
+    assert.equal(cfg.minecraft.version, '1.21.4');
+    assert.equal(cfg.owner, 'owner_name_12345');
+
+    const cfgInvalidPort = loadConfig(file, {
+      env: {
+        MINECRAFT_PORT: '99999',
+      },
+    });
+    assert.equal(cfgInvalidPort.minecraft.port, 25565);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('loadConfig validates config.example.json and preserves tuned defaults', () => {
+  const cfg = loadConfig('config.example.json', { env: {} });
+  assert.equal(cfg.llm.timeoutMs, 2500);
+  assert.equal(cfg.llm.maxRequestsPerMin, 30);
+  assert.equal(cfg.combat.maxVerticalDistance, 5);
+  assert.equal(cfg.combat.useThreatScore, true);
+  assert.equal(cfg.combat.minConfidence, 0.3);
+  assert.equal(cfg.inventory.blockStacks, 2);
+  assert.equal(cfg.building.autoScaffold, true);
+  assert.equal(cfg.building.maxPrepareBlocks, 1000);
+  assert.equal(cfg.humanizer.enabled, true);
+});

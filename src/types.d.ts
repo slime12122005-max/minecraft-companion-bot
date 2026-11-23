@@ -1,14 +1,22 @@
 export interface HumanizerConfig {
   enabled?: boolean;
   smoothLook?: boolean;
+  lookSteps?: number;
+  lookStepMs?: number;
+  lookJitterRad?: number;
   idleGaze?: boolean;
   socialGestures?: boolean;
+  gestureStepMs?: number;
   chatTypingDelay?: boolean;
+  typingBaseMs?: number;
   typingMsPerChar?: number;
   maxChatDelayMs?: number;
   personalSpace?: number;
   combatStrafe?: boolean;
+  strafeDurationMs?: number;
+  strafeCooldownMs?: number;
   attackJitterMs?: number;
+  preserveTestDelays?: boolean;
 }
 
 export interface LLMConfig {
@@ -34,11 +42,14 @@ export interface BotConfig {
     enabled: boolean;
     defendOwner: boolean;
     radius: number;
+    maxVerticalDistance?: number;
     retreatHealth: number;
     crit: boolean;
     bow: boolean;
     shieldAgainstCreeper: boolean;
     useCausality?: boolean;
+    useThreatScore?: boolean;
+    alwaysUseJev?: boolean;
     minConfidence?: number;
     jevIntervalMs?: number;
   };
@@ -49,7 +60,12 @@ export interface BotConfig {
   };
   building: {
     confirmTerrainChange: boolean;
+    autoScaffold?: boolean;
+    maxPrepareBlocks?: number;
     maxBlocksPerSession: number;
+    maxBlocks?: number;
+    maxSchematicBytes?: number;
+    maxPlacementAttempts?: number;
     keepWater?: boolean;
   };
   home: {
@@ -66,6 +82,7 @@ export interface BotConfig {
     enabled: boolean;
     host: string;
     port: number;
+    token?: string;
   };
 }
 

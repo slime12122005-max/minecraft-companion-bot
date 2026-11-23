@@ -155,6 +155,10 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
       return true;
 
     case 'set_home':
+      if (ctx.config?.home?.setOnCommand === false) {
+        await say('Cấu hình hiện tại không cho phép đặt nhà bằng lệnh.', { kind: 'error' });
+        return true;
+      }
       home.set(bot.entity);
       await memory.flush();
       await say('Đã lưu nơi này làm nhà.', { kind: 'final' });

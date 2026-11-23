@@ -5,6 +5,35 @@ import { formatError } from './task_helpers.js';
 export async function handleComplexCommand(ctx, parsed, { username, reply, parentSignal, chatCtx, say, errorReply }) {
   const { bot, builder, state } = ctx;
 
+  const runPrepare = async (spec) => {
+    let done = false;
+    say(`Bắt đầu dọn mặt bằng cho ${spec.file} tại ${spec.x}, ${spec.y}, ${spec.z}.`, { kind: 'start', isStale: () => done });
+    await ctx.runStepTask({ name: 'don_mat_bang', reason: 'Xác nhận dọn mặt bằng', file: spec.file }, async (signal) => {
+      try {
+        const res = await builder.prepare(spec, signal);
+        done = true;
+        await say(`Đã dọn mặt bằng xong (${res.bounds} ô: dọn ${res.cleared}, lấp ${res.filled}, giữ ${res.protected}).`, { kind: 'final' });
+      } finally {
+        done = true;
+      }
+    }, { onAbort: () => { done = true; bot.pathfinder?.setGoal?.(null); }, errPrefix: 'Dừng dọn mặt bằng', onError: errorReply }, parentSignal, reply);
+  };
+
+  const runBuild = async (spec) => {
+    let done = false;
+    say(`Bắt đầu xây ${spec.file} tại ${spec.x}, ${spec.y}, ${spec.z}.`, { kind: 'start', isStale: () => done });
+    await ctx.runStepTask({ name: 'xay_dung', reason: 'Xác nhận xây dựng', file: spec.file }, async (signal) => {
+      try {
+        await ctx.restockBuildMaterials(spec, signal, reply);
+        const res = await builder.build(spec, signal);
+        done = true;
+        await say(`Đã xây xong ${res.placed}/${res.total} block.`, { kind: 'final' });
+      } finally {
+        done = true;
+      }
+    }, { onAbort: () => { done = true; bot.pathfinder?.setGoal?.(null); }, errPrefix: 'Dừng xây', onError: errorReply }, parentSignal, reply);
+  };
+
   switch (parsed.type) {
     case 'download_schematic':
       try {
@@ -35,8 +64,14 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
           y: Math.round(bot.entity.position.y),
           z: Math.round(bot.entity.position.z) + 2,
         };
+        const spec = { mode: 'prepare', file: parsed.file, rotation: parsed.rotation, ...origin, confirmed: true };
         state.pendingAction = null;
-        state.pendingBuild = { mode: 'prepare', file: parsed.file, rotation: parsed.rotation, ...origin, confirmed: true };
+        if (ctx.config?.building?.confirmTerrainChange === false) {
+          state.pendingBuild = null;
+          await runPrepare(spec);
+          return true;
+        }
+        state.pendingBuild = spec;
         await say(`Chuẩn bị dọn mặt bằng cho ${parsed.file} (${info.blockCount} block) tại ${origin.x},${origin.y},${origin.z}. Gõ "xác nhận" để bắt đầu hoặc "hủy".`, { kind: 'prompt' });
       } catch (err) {
         await say(`Không đọc được schematic: ${err.message}`, { kind: 'error' });
@@ -53,8 +88,14 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
           y: Math.round(bot.entity.position.y),
           z: Math.round(bot.entity.position.z) + 2,
         };
+        const spec = { mode: 'build', file: parsed.file, rotation: parsed.rotation, ...origin };
         state.pendingAction = null;
-        state.pendingBuild = { mode: 'build', file: parsed.file, rotation: parsed.rotation, ...origin };
+        if (ctx.config?.building?.confirmTerrainChange === false) {
+          state.pendingBuild = null;
+          await runBuild(spec);
+          return true;
+        }
+        state.pendingBuild = spec;
         const topMats = Object.entries(info.materials).slice(0, 5).map(([k, v]) => `${k}:${v}`).join(', ');
         await say(`Mẫu ${parsed.file} (${info.blockCount} block, cần ${topMats}) tại ${origin.x},${origin.y},${origin.z}. Gõ "xác nhận" để xây hoặc "hủy".`, { kind: 'prompt' });
       } catch (err) {
@@ -81,31 +122,10 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
       const spec = state.pendingBuild;
       state.pendingBuild = null;
       if (spec.mode === 'prepare') {
-        let done = false;
-        say(`Bắt đầu dọn mặt bằng cho ${spec.file} tại ${spec.x}, ${spec.y}, ${spec.z}.`, { kind: 'start', isStale: () => done });
-        await ctx.runStepTask({ name: 'don_mat_bang', reason: 'Xác nhận dọn mặt bằng', file: spec.file }, async (signal) => {
-          try {
-            const res = await builder.prepare(spec, signal);
-            done = true;
-            await say(`Đã dọn mặt bằng xong (${res.bounds} ô: dọn ${res.cleared}, lấp ${res.filled}, giữ ${res.protected}).`, { kind: 'final' });
-          } finally {
-            done = true;
-          }
-        }, { onAbort: () => { done = true; bot.pathfinder?.setGoal?.(null); }, errPrefix: 'Dừng dọn mặt bằng', onError: errorReply }, parentSignal, reply);
+        await runPrepare(spec);
         return true;
       }
-      let done = false;
-      say(`Bắt đầu xây ${spec.file} tại ${spec.x}, ${spec.y}, ${spec.z}.`, { kind: 'start', isStale: () => done });
-      await ctx.runStepTask({ name: 'xay_dung', reason: 'Xác nhận xây dựng', file: spec.file }, async (signal) => {
-        try {
-          await ctx.restockBuildMaterials(spec, signal, reply);
-          const res = await builder.build(spec, signal);
-          done = true;
-          await say(`Đã xây xong ${res.placed}/${res.total} block.`, { kind: 'final' });
-        } finally {
-          done = true;
-        }
-      }, { onAbort: () => { done = true; bot.pathfinder?.setGoal?.(null); }, errPrefix: 'Dừng xây', onError: errorReply }, parentSignal, reply);
+      await runBuild(spec);
       return true;
     }
 

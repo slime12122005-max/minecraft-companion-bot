@@ -15,26 +15,35 @@ export const DEFAULT_CONFIG = {
     baseUrl: 'https://api.typesafe.ai',
     apiKeyEnv: 'TYPESAFE_API_KEY',
     jevIntervalMs: 4000,
+    timeoutMs: 2500,
+    maxRequestsPerMin: 30,
   },
   combat: {
     enabled: true,
     defendOwner: true,
     radius: 16,
+    maxVerticalDistance: 5,
     retreatHealth: 8,
     crit: true,
     bow: true,
     shieldAgainstCreeper: true,
     useCausality: true,
+    useThreatScore: true,
+    alwaysUseJev: false,
     minConfidence: 0.3,
   },
   inventory: {
-    blockStacks: 1,
+    blockStacks: 2,
     keepFood: 16,
     discardObsolete: false,
   },
   building: {
     confirmTerrainChange: true,
+    autoScaffold: true,
+    maxPrepareBlocks: 1000,
     maxBlocksPerSession: 5000,
+    maxBlocks: 50000,
+    maxSchematicBytes: 33554432,
     keepWater: false,
   },
   home: {
@@ -49,13 +58,20 @@ export const DEFAULT_CONFIG = {
   humanizer: {
     enabled: true,
     smoothLook: true,
+    lookSteps: 5,
+    lookStepMs: 22,
+    lookJitterRad: 0.025,
     idleGaze: true,
     socialGestures: true,
+    gestureStepMs: 115,
     chatTypingDelay: true,
+    typingBaseMs: 220,
     typingMsPerChar: 26,
     maxChatDelayMs: 1600,
     personalSpace: 3,
     combatStrafe: true,
+    strafeDurationMs: 200,
+    strafeCooldownMs: 650,
     attackJitterMs: 55,
   },
   dashboard: {
@@ -86,11 +102,14 @@ const ConfigSchema = z.object({
     enabled: z.boolean(),
     defendOwner: z.boolean(),
     radius: z.number().positive(),
+    maxVerticalDistance: z.number().positive().optional(),
     retreatHealth: z.number().nonnegative(),
     crit: z.boolean(),
     bow: z.boolean(),
     shieldAgainstCreeper: z.boolean(),
     useCausality: z.boolean().optional(),
+    useThreatScore: z.boolean().optional(),
+    alwaysUseJev: z.boolean().optional(),
     minConfidence: z.number().min(0).max(1).optional(),
     jevIntervalMs: z.number().int().positive().optional(),
   }),
@@ -101,7 +120,12 @@ const ConfigSchema = z.object({
   }),
   building: z.object({
     confirmTerrainChange: z.boolean(),
+    autoScaffold: z.boolean().optional(),
+    maxPrepareBlocks: z.number().int().positive().optional(),
     maxBlocksPerSession: z.number().int().positive(),
+    maxBlocks: z.number().int().positive().optional(),
+    maxSchematicBytes: z.number().int().positive().optional(),
+    maxPlacementAttempts: z.number().int().positive().optional(),
     keepWater: z.boolean().optional(),
   }),
   home: z.object({
@@ -116,15 +140,22 @@ const ConfigSchema = z.object({
   humanizer: z.object({
     enabled: z.boolean(),
     smoothLook: z.boolean(),
+    lookSteps: z.number().int().min(1),
+    lookStepMs: z.number().int().nonnegative(),
+    lookJitterRad: z.number().nonnegative(),
     idleGaze: z.boolean(),
     socialGestures: z.boolean(),
+    gestureStepMs: z.number().int().nonnegative(),
     chatTypingDelay: z.boolean(),
     typingBaseMs: z.number().int().nonnegative(),
     typingMsPerChar: z.number().nonnegative(),
     maxChatDelayMs: z.number().int().nonnegative(),
     personalSpace: z.number().int().min(1).max(6),
     combatStrafe: z.boolean(),
+    strafeDurationMs: z.number().int().nonnegative(),
+    strafeCooldownMs: z.number().int().nonnegative(),
     attackJitterMs: z.number().int().nonnegative(),
+    preserveTestDelays: z.boolean(),
   }).partial().optional(),
   dashboard: z.object({
     enabled: z.boolean(),
@@ -166,6 +197,26 @@ export function loadConfig(configPath = 'config.json', { env = process.env } = {
   const merged = deepMerge(DEFAULT_CONFIG, parsed);
 
   if (env) {
+    merged.minecraft = merged.minecraft ?? { ...DEFAULT_CONFIG.minecraft };
+    if (env.MINECRAFT_HOST && String(env.MINECRAFT_HOST).trim()) {
+      merged.minecraft.host = String(env.MINECRAFT_HOST).trim();
+    }
+    if (env.MINECRAFT_PORT != null && String(env.MINECRAFT_PORT).trim() !== '') {
+      const mcPort = Number(env.MINECRAFT_PORT);
+      if (Number.isInteger(mcPort) && mcPort >= 1 && mcPort <= 65535) {
+        merged.minecraft.port = mcPort;
+      }
+    }
+    if (env.MINECRAFT_USERNAME && String(env.MINECRAFT_USERNAME).trim()) {
+      merged.minecraft.username = String(env.MINECRAFT_USERNAME).trim().slice(0, 16);
+    }
+    if (env.MINECRAFT_VERSION && String(env.MINECRAFT_VERSION).trim()) {
+      merged.minecraft.version = String(env.MINECRAFT_VERSION).trim();
+    }
+    if (env.MINECRAFT_OWNER && String(env.MINECRAFT_OWNER).trim()) {
+      merged.owner = String(env.MINECRAFT_OWNER).trim().slice(0, 16);
+    }
+
     merged.dashboard = merged.dashboard ?? { ...DEFAULT_CONFIG.dashboard };
     const envEnabled = env.DASHBOARD_ENABLED != null ? String(env.DASHBOARD_ENABLED).trim().toLowerCase() : '';
     if (envEnabled === 'true' || envEnabled === '1') merged.dashboard.enabled = true;
