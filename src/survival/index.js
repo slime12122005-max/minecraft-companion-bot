@@ -1,6 +1,6 @@
 import { resolveCandidateNames } from './constants.js';
 import { bestFood, emergencyHeal, autoEat } from './nutrition.js';
-import { isOnFire, isInLava, isNether, handleHazards } from './hazard_reflex.js';
+import { isOnFire, isInLava, isNether, handleHazards, performUnstuckStep, clearUnstuckControls } from './hazard_reflex.js';
 import {
   recordDeath,
   getPendingDeathRecovery,
@@ -31,7 +31,7 @@ import {
 } from './gather_tree.js';
 import { ensurePickaxe, gather, giveToOwner } from './gather.js';
 
-export { resolveCandidateNames, scanNearbyThreats, isSafeSleepDimension, findSafeSleepBed };
+export { resolveCandidateNames, scanNearbyThreats, isSafeSleepDimension, findSafeSleepBed, performUnstuckStep, clearUnstuckControls };
 
 export class SurvivalManager {
   constructor(bot, config = {}, { memory = null, home = null, crafting = null, log = () => {} } = {}) {
@@ -55,6 +55,10 @@ export class SurvivalManager {
     this._lastTrackPos = null;
     this._lastTrackAt = 0;
     this._lastUnstuckAt = 0;
+    this._unstuckCount = 0;
+    this._unstuckDir = 1;
+    this._unstuckTimers = new Set();
+    this._unstuckWaiters = new Set();
     this._lastBotAlertAt = 0;
     this._lastOwnerAlertAt = 0;
     this._timeouts = {
@@ -85,6 +89,8 @@ export class SurvivalManager {
   emergencyHeal() { return emergencyHeal(this); }
   autoEat(opts) { return autoEat(this, opts); }
   handleHazards() { return handleHazards(this); }
+  unstuck(opts) { return performUnstuckStep(this, opts); }
+  stopUnstuck() { return clearUnstuckControls(this); }
 
   recordDeath(entity, dimension) { return recordDeath(this, entity, dimension); }
   getPendingDeathRecovery(opts) { return getPendingDeathRecovery(this, opts); }

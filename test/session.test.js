@@ -1297,3 +1297,134 @@ test('session honors home.setOnCommand false and building.confirmTerrainChange f
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('session runs 3-stage watchdog auto-unstuck recovery while sparing stationary follow', async () => {
+  const fakeBot = makeFakeBot();
+  const controls = [];
+  const goalsHistory = [];
+  let movingFlag = false;
+
+  fakeBot.setControlState = (k, v) => controls.push([k, v]);
+  fakeBot.pathfinder.isMoving = () => movingFlag;
+  fakeBot.pathfinder.goal = { tag: 'mine_goal' };
+  const origSetGoal = fakeBot.pathfinder.setGoal;
+
+  const memory = new Memory({ autoSaveMs: 0 });
+  const tasks = new TaskCoordinator({ log: () => {} });
+  const inboxState = { seq: 0, items: [] };
+
+  const session = createBotSession(DEFAULT_CONFIG, {
+    llm: {},
+    memory,
+    tasks,
+    inboxState,
+    router: new CommandRouter(),
+    createBotFn: () => fakeBot,
+    loadPlugins: false,
+  });
+
+  let sawBusyDuringRepath = false;
+  fakeBot.pathfinder.setGoal = (g, dyn) => {
+    if (g === null && session.survival.busy) sawBusyDuringRepath = true;
+    goalsHistory.push(g);
+    fakeBot.pathfinder.goal = g;
+    origSetGoal(g, dyn);
+  };
+
+  session.watchdog.stuckThresholdMs = 120;
+  session.watchdog.repathThresholdMs = 380;
+  session.watchdog.abortThresholdMs = 650;
+
+  try {
+    fakeBot.emit('spawn');
+
+    // 1) Stationary follow ("theo_chu") should NOT trigger stuck recovery
+    tasks.start({ name: 'theo_chu', owner: 'araslime' }, { onAbort: () => {}, onResume: () => {} });
+    await new Promise(r => setTimeout(r, 320));
+    assert.equal(session.watchdog.stuck, false);
+    assert.equal(tasks.active?.task?.name, 'theo_chu');
+    assert.equal(inboxState.items.some(i => i.alertType === 'stuck'), false);
+    tasks.abort('switch test');
+
+    // 2) Active moving task stuck at fixed position escalates through stages 1 -> 2 -> 3
+    movingFlag = true;
+    tasks.run({ name: 'dao_sat' }, () => new Promise(() => {}));
+
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline && !inboxState.items.some(i => i.alertType === 'stuck')) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    assert.ok(controls.some(([k, v]) => k === 'jump' && v === true));
+    assert.ok(controls.some(([k, v]) => (k === 'left' || k === 'right') && v === true));
+    assert.ok(controls.some(([k, v]) => k === 'back' && v === true));
+    assert.equal(sawBusyDuringRepath, true);
+    assert.ok(goalsHistory.includes(null));
+    assert.equal(tasks.active, null);
+    assert.equal(session.watchdog.stuck, false);
+
+    const stuckAlert = inboxState.items.find(i => i.alertType === 'stuck');
+    assert.ok(stuckAlert);
+    assert.equal(stuckAlert.kind, 'alert');
+    assert.equal(stuckAlert.severity, 'high');
+    assert.equal(stuckAlert.task, 'dao_sat');
+    assert.deepEqual(stuckAlert.position, { x: 0, y: 64, z: 0 });
+    assert.ok(memory.recentEvents({ eventType: 'stuck', limit: 5 }).length >= 1);
+  } finally {
+    await session.cleanup();
+  }
+});
+
+test('session emits proactive MCP alerts for rare_ore, low_durability, low_food, and low_health with cooldowns', async () => {
+  const fakeBot = makeFakeBot();
+  fakeBot.health = 5;
+  fakeBot.food = 8;
+  fakeBot.inventory.items = () => [
+    { name: 'iron_pickaxe', slot: 36, maxDurability: 250, durabilityUsed: 240 },
+  ];
+  fakeBot.findBlocks = () => [pos(5, 12, -3)];
+  fakeBot.blockAt = () => ({ name: 'diamond_ore', position: pos(5, 12, -3) });
+
+  const memory = new Memory({ autoSaveMs: 0 });
+  const tasks = new TaskCoordinator({ log: () => {} });
+  const inboxState = { seq: 0, items: [] };
+
+  const session = createBotSession(DEFAULT_CONFIG, {
+    llm: {},
+    memory,
+    tasks,
+    inboxState,
+    router: new CommandRouter(),
+    createBotFn: () => fakeBot,
+    loadPlugins: false,
+  });
+
+  try {
+    fakeBot.emit('spawn');
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline && inboxState.items.filter(i => i.kind === 'alert').length < 4) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    const alerts = inboxState.items.filter(i => i.kind === 'alert');
+    const types = new Set(alerts.map(a => a.alertType));
+    assert.ok(types.has('low_health'));
+    assert.ok(types.has('rare_ore'));
+    assert.ok(types.has('low_durability'));
+    assert.ok(types.has('low_food'));
+
+    const oreAlert = alerts.find(a => a.alertType === 'rare_ore');
+    assert.equal(oreAlert.ore, 'diamond_ore');
+    assert.deepEqual(oreAlert.position, { x: 5, y: 12, z: -3 });
+
+    const pois = memory.queryPois({ category: 'ore_vein' });
+    assert.ok(pois.some(p => p.label === 'diamond_ore@5,12,-3'));
+
+    // Next 1s maintenance cycle must NOT spam duplicate low_durability or low_food alerts
+    await new Promise(r => setTimeout(r, 1100));
+    assert.equal(inboxState.items.filter(i => i.alertType === 'low_durability').length, 1);
+    assert.equal(inboxState.items.filter(i => i.alertType === 'low_food').length, 1);
+  } finally {
+    await session.cleanup();
+  }
+});

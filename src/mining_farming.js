@@ -85,7 +85,7 @@ export class MiningFarmingManager {
     }
   }
 
-  scanValuableOres() {
+  scanValuableOresDetailed() {
     const now = Date.now();
     if (now - this.lastOreScanAt < 5000) return [];
     this.lastOreScanAt = now;
@@ -95,7 +95,7 @@ export class MiningFarmingManager {
     if (ids.length === 0) return [];
 
     const positions = this.bot.findBlocks({ matching: ids, maxDistance: 10, count: 6 }) ?? [];
-    const alerts = [];
+    const findings = [];
 
     for (const p of positions) {
       const key = `${p.x},${p.y},${p.z}`;
@@ -104,9 +104,19 @@ export class MiningFarmingManager {
       this.reportedOres.set(key, now);
       const block = this.bot.blockAt?.(p);
       const name = block?.name ?? 'quặng quý';
-      alerts.push(`Phát hiện ${name} tại ${p.x}, ${p.y}, ${p.z}!`);
+      findings.push({
+        name,
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        message: `Phát hiện ${name} tại ${p.x}, ${p.y}, ${p.z}!`,
+      });
     }
-    return alerts;
+    return findings;
+  }
+
+  scanValuableOres() {
+    return this.scanValuableOresDetailed().map(entry => entry.message);
   }
 
   async _digSafe(block, signal) {

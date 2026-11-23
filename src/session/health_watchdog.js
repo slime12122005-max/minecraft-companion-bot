@@ -1,10 +1,14 @@
 export class HealthWatchdog {
   constructor({
     stuckThresholdMs = 8000,
+    repathThresholdMs = 14000,
+    abortThresholdMs = 24000,
     lagThresholdMs = 1500,
     minMoveDistance = 0.25,
   } = {}) {
     this.stuckThresholdMs = stuckThresholdMs;
+    this.repathThresholdMs = repathThresholdMs;
+    this.abortThresholdMs = abortThresholdMs;
     this.lagThresholdMs = lagThresholdMs;
     this.minMoveDistance = minMoveDistance;
 
@@ -17,6 +21,15 @@ export class HealthWatchdog {
     this._anchorAt = null;
     this.stuckMs = 0;
     this.stuck = false;
+    this.recoveryStage = 0;
+  }
+
+  resetStuck(now = Date.now()) {
+    this._anchorPos = null;
+    this._anchorAt = now;
+    this.stuckMs = 0;
+    this.stuck = false;
+    this.recoveryStage = 0;
   }
 
   recordTick(now = Date.now(), {
@@ -25,6 +38,7 @@ export class HealthWatchdog {
     digging = false,
     sleeping = false,
     activeTask = false,
+    exempt = false,
   } = {}) {
     if (this.lastTickAt != null) {
       const gap = Math.max(0, now - this.lastTickAt);
@@ -36,12 +50,13 @@ export class HealthWatchdog {
     }
     this.lastTickAt = now;
 
-    if (pos && (moving || activeTask) && !digging && !sleeping) {
+    if (pos && (moving || activeTask) && !digging && !sleeping && !exempt) {
       if (!this._anchorPos) {
         this._anchorPos = { x: pos.x, y: pos.y, z: pos.z };
         this._anchorAt = now;
         this.stuckMs = 0;
         this.stuck = false;
+        this.recoveryStage = 0;
       } else {
         const dist = Math.hypot(
           pos.x - this._anchorPos.x,
@@ -53,16 +68,23 @@ export class HealthWatchdog {
           this._anchorAt = now;
           this.stuckMs = 0;
           this.stuck = false;
+          this.recoveryStage = 0;
         } else {
           this.stuckMs = Math.max(0, now - (this._anchorAt ?? now));
           this.stuck = this.stuckMs >= this.stuckThresholdMs;
+          if (this.stuckMs < this.stuckThresholdMs) {
+            this.recoveryStage = 0;
+          } else if (this.stuckMs < this.repathThresholdMs) {
+            this.recoveryStage = 1;
+          } else if (this.stuckMs < this.abortThresholdMs) {
+            this.recoveryStage = 2;
+          } else {
+            this.recoveryStage = 3;
+          }
         }
       }
     } else {
-      this._anchorPos = null;
-      this._anchorAt = now;
-      this.stuckMs = 0;
-      this.stuck = false;
+      this.resetStuck(now);
     }
 
     return this.status();
@@ -73,6 +95,7 @@ export class HealthWatchdog {
       healthy: !this.stuck && !this.lagDetected,
       stuck: this.stuck,
       stuckMs: this.stuckMs,
+      recoveryStage: this.recoveryStage,
       lagDetected: this.lagDetected,
       lastTickGapMs: this.lastTickGapMs,
       maxTickLagMs: this.maxTickLagMs,

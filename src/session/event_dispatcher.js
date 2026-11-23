@@ -145,18 +145,24 @@ export function bindSessionEvents(ctx) {
   let lastSlowMaintainAt = 0;
   let lastDangerAlertAt = 0;
   let jevSurvivalPending = false;
+  let lastStuckStageHandled = 0;
+  let lastStuckAlertAt = 0;
+  let lastLowFoodAlertAt = 0;
+  const lastLowDurAlertAt = new Map();
 
   const loop = setInterval(async () => {
     if (disposed || !bot.entity || bot.isAlive === false || combatTicking) return;
     combatTicking = true;
     const now = Date.now();
     try {
-      watchdog.recordTick(now, {
+      const isStationaryFollow = tasks.active?.task?.name === 'theo_chu' && !bot.pathfinder?.isMoving?.();
+      const wdStatus = watchdog.recordTick(now, {
         pos: bot.entity.position,
         moving: Boolean(bot.pathfinder?.isMoving?.()),
         digging: Boolean(bot.targetDigBlock),
         sleeping: Boolean(bot.isSleeping),
-        activeTask: Boolean(tasks.active && !tasks.paused),
+        activeTask: Boolean(tasks.active && !tasks.paused && !isStationaryFollow),
+        exempt: Boolean(state.aiPaused || combat.busy || survival.busy || bot.currentWindow),
       });
 
       if (!state.aiPaused) {
@@ -184,6 +190,7 @@ export function bindSessionEvents(ctx) {
           const curTaskName = tasks.status().active?.name ?? 'rảnh';
           ctx.pushInbox?.({
             kind: 'alert',
+            alertType: 'combat_danger',
             role: 'SYSTEM',
             severity: (bot.health ?? 20) <= 6 || jevUrgent ? 'critical' : 'high',
             username: bot.username,
@@ -212,6 +219,7 @@ export function bindSessionEvents(ctx) {
                 ctx.stopCurrentTask('Jev phát hiện nguy hiểm cao');
                 ctx.pushInbox?.({
                   kind: 'alert',
+                  alertType: 'jev_abort',
                   role: 'SYSTEM',
                   severity: 'critical',
                   username: bot.username,
@@ -222,6 +230,69 @@ export function bindSessionEvents(ctx) {
             }).catch(() => {}).finally(() => {
               jevSurvivalPending = false;
             });
+          }
+        }
+
+        if (!combat.busy && !survival.busy && !bot.isSleeping && !bot.currentWindow) {
+          if (!wdStatus.stuck) {
+            lastStuckStageHandled = 0;
+          } else if (wdStatus.recoveryStage > lastStuckStageHandled) {
+            if (wdStatus.recoveryStage === 1) {
+              lastStuckStageHandled = 1;
+              warnFor('watchdog', `Phát hiện bot đứng kẹt (${Math.round(wdStatus.stuckMs / 1000)}s), thử nhích nhảy thoát kẹt.`);
+              survival.unstuck?.({ stage: 1 }).catch?.(() => {});
+            } else if (wdStatus.recoveryStage === 2) {
+              lastStuckStageHandled = 2;
+              warnFor('watchdog', `Bot vẫn kẹt (${Math.round(wdStatus.stuckMs / 1000)}s), thử lùi + tìm lại đường đi.`);
+              await survival.unstuck?.({
+                stage: 2,
+                repath: true,
+                onRepath: (prevGoal) => {
+                  if (tasks.active?.onResume) {
+                    tasks.active.onResume();
+                  } else if (prevGoal && !tasks.active) {
+                    bot.pathfinder?.setGoal?.(prevGoal);
+                  }
+                },
+              });
+            } else if (wdStatus.recoveryStage >= 3) {
+              const curTaskName = tasks.status().active?.name ?? 'di_chuyen';
+              const pos = bot.entity?.position;
+              const position = pos ? {
+                x: Math.round(pos.x),
+                y: Math.round(pos.y),
+                z: Math.round(pos.z),
+              } : null;
+              warnFor('watchdog', `Bot bị kẹt quá lâu (${Math.round(wdStatus.stuckMs / 1000)}s) khi đang làm "${curTaskName}", tự dừng để báo Antigravity.`);
+              if (tasks.active) {
+                ctx.stopCurrentTask('Bị kẹt quá lâu');
+              } else {
+                bot.pathfinder?.setGoal?.(null);
+              }
+              watchdog.resetStuck(now);
+              lastStuckStageHandled = 0;
+              if (now - lastStuckAlertAt >= 30000) {
+                lastStuckAlertAt = now;
+                memory?.recordEvent?.({
+                  eventType: 'stuck',
+                  summary: `Bị kẹt quá lâu (${Math.round(wdStatus.stuckMs / 1000)}s) khi làm ${curTaskName}`,
+                  x: position?.x ?? null,
+                  y: position?.y ?? null,
+                  z: position?.z ?? null,
+                });
+                ctx.pushInbox?.({
+                  kind: 'alert',
+                  alertType: 'stuck',
+                  role: 'SYSTEM',
+                  severity: 'high',
+                  username: bot.username,
+                  message: `Bot bị kẹt quá lâu (${Math.round(wdStatus.stuckMs / 1000)}s) khi đang làm "${curTaskName}" nên đã tự dừng để chờ chỉ đạo`,
+                  task: curTaskName,
+                  stuckMs: wdStatus.stuckMs,
+                  position,
+                });
+              }
+            }
           }
         }
       }
@@ -262,9 +333,82 @@ export function bindSessionEvents(ctx) {
         });
         for (const alert of survival.checkHealthAlerts({ ownerName: config.owner })) {
           bot.chat(alert);
+          ctx.pushInbox?.({
+            kind: 'alert',
+            alertType: 'low_health',
+            role: 'SYSTEM',
+            severity: 'critical',
+            username: bot.username,
+            message: alert,
+            health: bot.health ?? 20,
+          });
         }
-        for (const oreAlert of mining.scanValuableOres()) {
-          bot.chat(oreAlert);
+        const oreFindings = typeof mining.scanValuableOresDetailed === 'function'
+          ? mining.scanValuableOresDetailed()
+          : mining.scanValuableOres().map(message => ({ message }));
+        for (const ore of oreFindings) {
+          bot.chat(ore.message);
+          if (ore.x != null && ore.y != null && ore.z != null) {
+            memory?.upsertPoi?.({
+              category: 'ore_vein',
+              label: `${ore.name ?? 'rare_ore'}@${ore.x},${ore.y},${ore.z}`,
+              dimension: String(bot.game?.dimension ?? 'overworld'),
+              x: ore.x,
+              y: ore.y,
+              z: ore.z,
+            });
+          }
+          ctx.pushInbox?.({
+            kind: 'alert',
+            alertType: 'rare_ore',
+            role: 'SYSTEM',
+            severity: 'info',
+            username: bot.username,
+            message: ore.message,
+            ore: ore.name ?? null,
+            position: ore.x != null ? { x: ore.x, y: ore.y, z: ore.z } : null,
+          });
+        }
+        if (typeof equipment.getLowDurabilityItems === 'function') {
+          const lowDur = equipment.getLowDurabilityItems(0.10);
+          const freshLowDur = [];
+          for (const item of lowDur) {
+            const key = `${item.name}:${item.slot}`;
+            const prevAt = lastLowDurAlertAt.get(key) ?? 0;
+            if (now - prevAt >= 120000) {
+              lastLowDurAlertAt.set(key, now);
+              freshLowDur.push(item);
+            }
+          }
+          if (freshLowDur.length > 0) {
+            const summary = freshLowDur
+              .map(i => `${i.name} (${Math.round((i.ratio ?? 0) * 100)}%)`)
+              .join(', ');
+            ctx.pushInbox?.({
+              kind: 'alert',
+              alertType: 'low_durability',
+              role: 'SYSTEM',
+              severity: 'medium',
+              username: bot.username,
+              message: `Trang bị/công cụ sắp hỏng (<10%): ${summary}`,
+              items: freshLowDur,
+            });
+          }
+        }
+        const curFood = bot.food ?? 20;
+        const hasFood = Boolean(typeof survival._bestFood === 'function' ? survival._bestFood() : null);
+        if (curFood <= 10 && !hasFood && now - lastLowFoodAlertAt >= 60000) {
+          lastLowFoodAlertAt = now;
+          ctx.pushInbox?.({
+            kind: 'alert',
+            alertType: 'low_food',
+            role: 'SYSTEM',
+            severity: curFood <= 6 ? 'critical' : 'high',
+            username: bot.username,
+            message: `Bot đang đói (${Math.round(curFood)}/20) và đã hết thức ăn trong túi`,
+            food: curFood,
+            health: bot.health ?? 20,
+          });
         }
         if (!combat.busy && !tasks.active) {
           survival.pickupNearbyItem();
@@ -323,6 +467,7 @@ export function bindSessionEvents(ctx) {
     detach('error', onError);
     detach('kicked', onKicked);
     combat.stop();
+    survival.stopUnstuck?.();
     ctx.humanizer?.dispose?.();
     ctx.stopCurrentTask('Ngắt kết nối', { clearQueue: true });
     if (!externalDashboard) {

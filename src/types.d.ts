@@ -112,6 +112,7 @@ export interface WatchdogStatus {
   healthy: boolean;
   stuck: boolean;
   stuckMs: number;
+  recoveryStage?: number;
   lagDetected: boolean;
   lastTickGapMs: number;
   maxTickLagMs: number;

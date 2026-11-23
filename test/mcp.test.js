@@ -813,6 +813,33 @@ test('MCP Antigravity planner executes mc_plan_execute, mc_smelt, tags inbox rol
     const alertData = JSON.parse(alertRes.result.content[0].text);
     assert.equal(alertData.reason, 'alert');
     assert.match(JSON.stringify(alertData), /Creeper quá gần!/);
+
+    // mc_wait_event with waitFor='alert' also wakes on proactive stuck / rare_ore alerts
+    const sinceBeforeStuck = inboxState.seq;
+    setTimeout(() => {
+      inboxState.items.push({
+        id: ++inboxState.seq,
+        ts: new Date().toISOString(),
+        kind: 'alert',
+        alertType: 'stuck',
+        role: 'SYSTEM',
+        severity: 'high',
+        username: 'bot_dong_hanh',
+        message: 'Bot bị kẹt quá lâu (24s) khi đang làm "dao_sat"',
+      });
+    }, 25);
+    const stuckWaitRes = await handle({
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: {
+        name: 'mc_wait_event',
+        arguments: { waitFor: 'alert', sinceInboxId: sinceBeforeStuck, timeoutSec: 2 },
+      },
+    });
+    const stuckAlertData = JSON.parse(stuckWaitRes.result.content[0].text);
+    assert.equal(stuckAlertData.reason, 'alert');
+    assert.equal(stuckAlertData.newMessages[0].alertType, 'stuck');
   } finally {
     await session.cleanup();
     await dash.stop();

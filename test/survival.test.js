@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SurvivalManager, isSafeSleepDimension, findSafeSleepBed } from '../src/survival.js';
+import { SurvivalManager, isSafeSleepDimension, findSafeSleepBed, performUnstuckStep, clearUnstuckControls } from '../src/survival.js';
 import { Memory } from '../src/memory.js';
 
 function pos(x, y, z) {
@@ -986,4 +986,74 @@ test('recordDeath marks lava/void deaths as unrecoverable and sleep helpers enfo
 
   const netherBot = { ...overworldBot, game: { dimension: 'the_nether' } };
   assert.equal(findSafeSleepBed(netherBot, owner, 16), null);
+});
+
+test('performUnstuckStep escalates stage 1/2, alternates strafe, honors hazardBusy repath and lava safety', async () => {
+  const controls = [];
+  const goalsSet = [];
+  let inLava = false;
+  let busySeenDuringSetGoal = false;
+
+  const bot = {
+    isSleeping: false,
+    entity: { position: pos(0, 64, 0), isInLava: false, metadata: { 0: 0 } },
+    setControlState: (k, v) => controls.push([k, v]),
+    pathfinder: {
+      goal: { tag: 'old_goal' },
+      setGoal: (g) => {
+        goalsSet.push(g);
+        if (g === null && survival.busy) busySeenDuringSetGoal = true;
+        bot.pathfinder.goal = g;
+      },
+    },
+    blockAt: () => ({ name: inLava ? 'lava' : 'air' }),
+  };
+
+  const survival = new SurvivalManager(bot);
+
+  // Stage 1: alternates lateral strafe + jump
+  const r1 = await performUnstuckStep(survival, { stage: 1, jumpMs: 15, strafeMs: 20 });
+  assert.equal(r1.stage, 1);
+  assert.equal(r1.backed, false);
+  assert.equal(r1.repathed, false);
+  assert.equal(r1.strafeKey, 'left');
+  await new Promise(r => setTimeout(r, 35));
+  assert.ok(controls.some(([k, v]) => k === 'jump' && v === true));
+  assert.ok(controls.some(([k, v]) => k === 'left' && v === true));
+  assert.ok(controls.some(([k, v]) => k === 'left' && v === false));
+
+  // Stage 2: alternates to right, pulses back, resets pathfinder under hazardBusy, and invokes onRepath
+  controls.length = 0;
+  let repathPrevGoal = null;
+  const r2 = await performUnstuckStep(survival, {
+    stage: 2,
+    repath: true,
+    jumpMs: 15,
+    backMs: 15,
+    strafeMs: 20,
+    onRepath: (prev) => { repathPrevGoal = prev; },
+  });
+  assert.equal(r2.stage, 2);
+  assert.equal(r2.strafeKey, 'right');
+  assert.equal(r2.backed, true);
+  assert.equal(r2.repathed, true);
+  assert.equal(survival.busy, false);
+  assert.equal(busySeenDuringSetGoal, true);
+  assert.deepEqual(goalsSet, [null]);
+  assert.deepEqual(repathPrevGoal, { tag: 'old_goal' });
+  assert.ok(controls.some(([k, v]) => k === 'back' && v === true));
+  assert.ok(controls.some(([k, v]) => k === 'right' && v === true));
+  assert.ok(controls.some(([k, v]) => k === 'back' && v === false));
+
+  // Lava guard: jump only, no lateral/back movement
+  controls.length = 0;
+  inLava = true;
+  bot.entity.isInLava = true;
+  const rLava = await performUnstuckStep(survival, { stage: 2, jumpMs: 15, backMs: 15, strafeMs: 20 });
+  assert.equal(rLava.strafeKey, null);
+  assert.equal(rLava.backed, false);
+  assert.ok(controls.some(([k, v]) => k === 'jump' && v === true));
+  assert.ok(!controls.some(([k, v]) => (k === 'left' || k === 'right' || k === 'back') && v === true));
+
+  clearUnstuckControls(survival);
 });

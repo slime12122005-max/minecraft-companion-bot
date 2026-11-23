@@ -46,6 +46,34 @@ test('scanValuableOres detects diamond_ore once per coordinate', () => {
   assert.equal(second.length, 0);
 });
 
+test('scanValuableOresDetailed returns structured ore coordinates and shares deduplication with scanValuableOres', () => {
+  const orePos1 = new Vec3(8, -54, 12);
+  const orePos2 = new Vec3(9, -54, 12);
+  let scanList = [orePos1];
+  const bot = {
+    registry: { blocksByName: { deepslate_diamond_ore: { id: 57 } } },
+    findBlocks: () => scanList,
+    blockAt: (p) => ({ name: 'deepslate_diamond_ore', position: p }),
+  };
+
+  const mgr = new MiningFarmingManager(bot);
+  const detailed = mgr.scanValuableOresDetailed();
+  assert.deepEqual(detailed, [
+    {
+      name: 'deepslate_diamond_ore',
+      x: 8,
+      y: -54,
+      z: 12,
+      message: 'Phát hiện deepslate_diamond_ore tại 8, -54, 12!',
+    },
+  ]);
+
+  mgr.lastOreScanAt = 0;
+  scanList = [orePos1, orePos2];
+  const msgs = mgr.scanValuableOres();
+  assert.deepEqual(msgs, ['Phát hiện deepslate_diamond_ore tại 9, -54, 12!']);
+});
+
 test('farmCrops harvests mature wheat and replants wheat_seeds onto farmland', async () => {
   const dug = [];
   const placed = [];

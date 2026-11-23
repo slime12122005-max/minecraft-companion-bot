@@ -51,7 +51,7 @@ export const TOOLS = [
   {
     name: 'mc_get_inbox',
     description:
-      'Đọc tin nhắn chat/whisper từ người chơi trong Minecraft và các sự kiện quan trọng (spawn, death, kicked) mà bot ghi nhận.',
+      'Đọc tin nhắn chat/whisper từ người chơi trong Minecraft, các sự kiện hệ thống (spawn, death, kicked) và cảnh báo chủ động (alert: combat_danger, stuck, rare_ore, low_durability, low_food, low_health).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -211,7 +211,7 @@ export const TOOLS = [
         waitFor: {
           type: 'string',
           enum: ['task_done', 'inbox', 'alert', 'any'],
-          description: 'Loại sự kiện muốn đợi (mặc định any; dùng alert để bắt cảnh báo nguy hiểm từ Jev/hệ thống).',
+          description: 'Loại sự kiện muốn đợi (mặc định any; dùng alert để bắt cảnh báo từ Jev/Watchdog/hệ thống như combat_danger, stuck, rare_ore, low_durability, low_food, low_health).',
         },
         sinceInboxId: {
           type: 'integer',

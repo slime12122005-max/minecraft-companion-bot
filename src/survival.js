@@ -1,1 +1,1 @@
-export { SurvivalManager, resolveCandidateNames, scanNearbyThreats, isSafeSleepDimension, findSafeSleepBed, default } from './survival/index.js';
+export { SurvivalManager, resolveCandidateNames, scanNearbyThreats, isSafeSleepDimension, findSafeSleepBed, performUnstuckStep, clearUnstuckControls, default } from './survival/index.js';

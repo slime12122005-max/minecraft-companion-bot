@@ -83,6 +83,46 @@ test('HealthWatchdog detects movement stuck vs digging/sleeping exemptions and t
   // Digging or sleeping resets stuck timer even if stationary
   st = wd.recordTick(13000, { pos: { x: 11, y: 64, z: 10 }, moving: false, activeTask: true, digging: true });
   assert.equal(st.stuck, false);
+  assert.equal(st.recoveryStage, 0);
+});
+
+test('HealthWatchdog escalates recoveryStage (0 -> 1 -> 2 -> 3), honors exempt, and resets via resetStuck', () => {
+  const wd = new HealthWatchdog({
+    stuckThresholdMs: 2000,
+    repathThresholdMs: 5000,
+    abortThresholdMs: 9000,
+    lagThresholdMs: 20000,
+    minMoveDistance: 0.25,
+  });
+
+  const p0 = { x: 4, y: 64, z: 4 };
+  let st = wd.recordTick(1000, { pos: p0, activeTask: true });
+  assert.equal(st.recoveryStage, 0);
+
+  st = wd.recordTick(3100, { pos: p0, activeTask: true });
+  assert.equal(st.stuck, true);
+  assert.equal(st.recoveryStage, 1);
+
+  st = wd.recordTick(6200, { pos: p0, activeTask: true });
+  assert.equal(st.stuck, true);
+  assert.equal(st.recoveryStage, 2);
+
+  st = wd.recordTick(10500, { pos: p0, activeTask: true });
+  assert.equal(st.stuck, true);
+  assert.equal(st.recoveryStage, 3);
+
+  wd.resetStuck(10500);
+  assert.equal(wd.status().stuck, false);
+  assert.equal(wd.status().stuckMs, 0);
+  assert.equal(wd.status().recoveryStage, 0);
+
+  // exempt resets stuck timer cleanly
+  wd.recordTick(11000, { pos: p0, activeTask: true });
+  st = wd.recordTick(14000, { pos: p0, activeTask: true });
+  assert.equal(st.recoveryStage, 1);
+  st = wd.recordTick(14200, { pos: p0, activeTask: true, exempt: true });
+  assert.equal(st.stuck, false);
+  assert.equal(st.recoveryStage, 0);
 });
 
 test('scanNearbyThreats ignores passive/friendly entities and scores hostiles and creepers', () => {

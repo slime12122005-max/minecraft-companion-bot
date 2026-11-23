@@ -48,6 +48,122 @@ export function isNether(bot) {
   return dim.includes('nether');
 }
 
+export function clearUnstuckControls(ctx) {
+  if (ctx._unstuckTimers) {
+    for (const t of ctx._unstuckTimers) {
+      clearTimeout(t);
+    }
+    ctx._unstuckTimers.clear();
+  }
+  if (ctx._unstuckWaiters) {
+    for (const entry of ctx._unstuckWaiters) {
+      clearTimeout(entry.timer);
+      try { entry.resolve(); } catch {}
+    }
+    ctx._unstuckWaiters.clear();
+  }
+  if (typeof ctx.bot?.setControlState === 'function') {
+    for (const key of ['left', 'right', 'back']) {
+      try { ctx.bot.setControlState(key, false); } catch {}
+    }
+    if (!ctx._hazardJumpActive) {
+      try { ctx.bot.setControlState('jump', false); } catch {}
+    }
+  }
+}
+
+export async function performUnstuckStep(ctx, {
+  stage = 1,
+  repath = false,
+  onRepath = null,
+  jumpMs = 250,
+  strafeMs = 320,
+  backMs = 220,
+} = {}) {
+  if (typeof ctx.bot?.setControlState !== 'function' || ctx.bot.isSleeping || ctx.eating) {
+    return { stage, strafeKey: null, backed: false, repathed: false };
+  }
+
+  const unsafeLateral = Boolean(
+    ctx._isInLava?.() ||
+    ctx._isOnFire?.() ||
+    (typeof ctx.bot.oxygenLevel === 'number' && ctx.bot.oxygenLevel <= 10)
+  );
+  ctx._unstuckDir = ctx._unstuckDir === 1 ? -1 : 1;
+  const strafeKey = ctx._unstuckDir === 1 ? 'right' : 'left';
+  if (!ctx._unstuckTimers) ctx._unstuckTimers = new Set();
+
+  const pulseControl = (key, durationMs) => {
+    const ms = Math.max(0, Number(durationMs) || 0);
+    try { ctx.bot.setControlState(key, true); } catch {}
+    const timer = setTimeout(() => {
+      ctx._unstuckTimers?.delete(timer);
+      if (key === 'jump' && ctx._hazardJumpActive) return;
+      try { ctx.bot.setControlState(key, false); } catch {}
+    }, ms);
+    timer.unref?.();
+    ctx._unstuckTimers.add(timer);
+  };
+
+  if (stage <= 1) {
+    pulseControl('jump', jumpMs);
+    if (!unsafeLateral) {
+      pulseControl(strafeKey, strafeMs);
+    }
+    return {
+      stage: 1,
+      strafeKey: unsafeLateral ? null : strafeKey,
+      backed: false,
+      repathed: false,
+    };
+  }
+
+  await runHazardHandAction(ctx, async () => {
+    let prevGoal = null;
+    if (repath) {
+      prevGoal = ctx.bot.pathfinder?.goal ?? null;
+      try { ctx.bot.pathfinder?.setGoal?.(null); } catch {}
+    }
+    try {
+      pulseControl('jump', jumpMs);
+      if (!unsafeLateral) {
+        pulseControl('back', backMs);
+        pulseControl(strafeKey, strafeMs);
+      }
+      const waitMs = Math.max(
+        Math.max(0, Number(jumpMs) || 0),
+        unsafeLateral ? 0 : Math.max(Math.max(0, Number(backMs) || 0), Math.max(0, Number(strafeMs) || 0))
+      );
+      if (waitMs > 0) {
+        await new Promise((resolve) => {
+          const entry = {
+            resolve,
+            timer: setTimeout(() => {
+              ctx._unstuckWaiters?.delete(entry);
+              resolve();
+            }, waitMs),
+          };
+          entry.timer.unref?.();
+          if (!ctx._unstuckWaiters) ctx._unstuckWaiters = new Set();
+          ctx._unstuckWaiters.add(entry);
+        });
+      }
+    } finally {
+      clearUnstuckControls(ctx);
+    }
+    if (repath && typeof onRepath === 'function') {
+      try { onRepath(prevGoal); } catch {}
+    }
+  });
+
+  return {
+    stage,
+    strafeKey: unsafeLateral ? null : strafeKey,
+    backed: !unsafeLateral,
+    repathed: Boolean(repath),
+  };
+}
+
 export async function handleHazards(ctx) {
   const entity = ctx.bot.entity;
   if (!entity?.position) return false;
@@ -166,25 +282,34 @@ export async function handleHazards(ctx) {
   }
 
   // 5. Anti-stuck when pathfinder is trying to move
-  if (!ctx.eating && !ctx.bot.isSleeping && ctx.bot.pathfinder?.isMoving?.()) {
-    if (!ctx._lastTrackPos || entity.position.distanceTo(ctx._lastTrackPos) >= 0.35) {
-      ctx._lastTrackPos = entity.position.clone ? entity.position.clone() : { ...entity.position };
+  if (!ctx.eating && !ctx.hazardBusy && !ctx.bot.isSleeping && ctx.bot.pathfinder?.isMoving?.()) {
+    const distFromTrack = ctx._lastTrackPos
+      ? Math.hypot(
+          entity.position.x - ctx._lastTrackPos.x,
+          entity.position.y - ctx._lastTrackPos.y,
+          entity.position.z - ctx._lastTrackPos.z
+        )
+      : Infinity;
+    if (!ctx._lastTrackPos || distFromTrack >= 0.35) {
+      ctx._lastTrackPos = entity.position.clone
+        ? entity.position.clone()
+        : { x: entity.position.x, y: entity.position.y, z: entity.position.z };
       ctx._lastTrackAt = now;
+      ctx._unstuckCount = 0;
     } else if (now - ctx._lastTrackAt >= 4000 && now - ctx._lastUnstuckAt >= 4000) {
       ctx._lastUnstuckAt = now;
       ctx._lastTrackAt = now;
-      if (typeof ctx.bot.setControlState === 'function') {
-        ctx.bot.setControlState('jump', true);
-        setTimeout(() => {
-          if (!ctx._hazardJumpActive) {
-            try { ctx.bot.setControlState('jump', false); } catch {}
-          }
-        }, 250).unref?.();
-      }
+      ctx._unstuckCount = (ctx._unstuckCount ?? 0) + 1;
+      performUnstuckStep(ctx, {
+        stage: ctx._unstuckCount >= 2 ? 2 : 1,
+        repath: false,
+      }).catch(() => {});
+      acted = true;
     }
   } else {
     ctx._lastTrackPos = null;
     ctx._lastTrackAt = now;
+    ctx._unstuckCount = 0;
   }
 
   return acted;
