@@ -22,19 +22,34 @@ import { createTaskHelpers } from './task_helpers.js';
 import { createCommandDispatcher } from './command_dispatcher.js';
 import { createChatHandler } from './chat_handler.js';
 import { bindSessionEvents } from './event_dispatcher.js';
+import { resolveMineflayerVersion } from '../config.js';
 import { createDashboardBridge } from './dashboard_bridge.js';
+import { CompanionManager } from '../companion.js';
+import { WorkScratchpad } from '../scratchpad.js';
+import { attachFabricModCompat } from './fabric_compat.js';
 
-export function createBotSession(config, { llm, memory, tasks, router, logger = null, createBotFn = createBot, loadPlugins = true, onConnect = null, externalDashboard = null, inboxState = null } = {}) {
+export function createBotSession(config, { llm, memory, tasks, router, logger = null, createBotFn = createBot, loadPlugins = true, onConnect = null, externalDashboard = null, inboxState = null, sessionId = null } = {}) {
   const logFor = (tag) => (logger ? logger.scoped(tag) : (...a) => console.log(`[${tag}]`, ...a));
   const warnFor = (tag, ...a) => (logger ? logger.warn(tag, ...a) : console.warn(`[${tag}]`, ...a));
   const errorFor = (tag, ...a) => (logger ? logger.error(tag, ...a) : console.error(`[${tag}]`, ...a));
 
-  const bot = createBotFn({
+  const authMode = config.minecraft?.auth === 'microsoft' ? 'microsoft' : 'offline';
+  const rawUsername = String(config.minecraft.username || 'bot_dong_hanh');
+  const botOptions = {
     host: config.minecraft.host,
     port: config.minecraft.port,
-    username: String(config.minecraft.username || 'bot_dong_hanh').slice(0, 16),
-    version: config.minecraft.version,
-  });
+    username: authMode === 'microsoft' ? rawUsername.slice(0, 120) : rawUsername.slice(0, 16),
+    version: resolveMineflayerVersion(config.minecraft.version),
+  };
+  if (authMode === 'microsoft') {
+    botOptions.auth = 'microsoft';
+    botOptions.profilesFolder = config.minecraft.profilesFolder || 'data/auth-cache';
+    botOptions.onMsaCode = (data) => {
+      logFor('auth')(`🔐 Đăng nhập Microsoft cho bot: mở ${data?.verification_uri || 'https://www.microsoft.com/link'} và nhập mã ${data?.user_code || ''}`);
+    };
+  }
+  const bot = createBotFn(botOptions);
+  const fabricCompat = attachFabricModCompat(bot, { log: logFor('fabric') });
 
   if (loadPlugins) {
     bot.loadPlugin(pathfinder);
@@ -43,6 +58,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
   }
 
   const state = {
+    sessionId: sessionId ? String(sessionId) : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     connected: false,
     disconnected: false,
     aiPaused: false,
@@ -51,7 +67,14 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     lastCombatEndedAt: 0,
     pendingBuild: null,
     pendingAction: null,
+    pendingQuantity: null,
     chatGen: 0,
+    stayPut: false,
+    idleGoalActive: false,
+    autoFarmEnabled: config.companion?.autoFarm !== false,
+    lastMcpPollAt: 0,
+    lastSidecarPollAt: 0,
+    lastApiActionAt: 0,
   };
 
   const stateMachine = new BotStateMachine();
@@ -130,6 +153,8 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     log: logFor('combat'),
   });
 
+  mining.setShelterHold = (pos) => { combat.shelterHoldPos = pos; };
+
   const builder = new Builder(bot, config, {
     log: logFor('building'),
     equipment,
@@ -151,11 +176,16 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     return item;
   };
 
+  const scratchpad = new WorkScratchpad(memory, { sessionId: state.sessionId });
+  scratchpad.adoptCrashState(state.sessionId);
+
   const ctx = {
     bot,
     config,
     llm,
     memory,
+    scratchpad,
+    loadPlugins: Boolean(loadPlugins),
     tasks,
     router,
     logger,
@@ -171,6 +201,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     macros: null,
     stateMachine,
     watchdog,
+    fabricCompat,
     externalDashboard,
     dashboard: null,
     isWorkPaused,
@@ -189,8 +220,14 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
   ctx.macros = macros;
   Object.assign(ctx, createChatHandler(ctx));
   Object.assign(ctx, createCommandDispatcher(ctx));
+  const companion = new CompanionManager(ctx, {
+    enabledChat: Boolean(config.companion?.naturalChat !== false && (loadPlugins !== false || config.companion?.preserveInTests)),
+    enabledIdle: Boolean(config.companion?.idleLife && (loadPlugins !== false || config.companion?.preserveInTests)),
+  });
+  ctx.companion = companion;
 
   const bridge = createDashboardBridge(ctx);
+  ctx.dashboardBridge = bridge;
   const getDashboardState = bridge.getDashboardState;
   const onDashboardCmd = bridge.onCommand;
 
@@ -210,6 +247,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     onMacro: bridge.onMacro,
     onPlanExecute: bridge.onPlanExecute,
     onSmelt: bridge.onSmelt,
+    onScratchpad: bridge.onScratchpad,
   });
   ctx.dashboard = dashboard;
 
@@ -224,6 +262,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     externalDashboard.onMacro = bridge.onMacro;
     externalDashboard.onPlanExecute = bridge.onPlanExecute;
     externalDashboard.onSmelt = bridge.onSmelt;
+    externalDashboard.onScratchpad = bridge.onScratchpad;
     if (onConnect) externalDashboard.onConnect = onConnect;
   } else if (config.dashboard?.enabled && loadPlugins !== false) {
     dashboard.start().catch(err => errorFor('web', err.message));
@@ -247,6 +286,9 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     dashboard,
     stateMachine,
     watchdog,
+    companion,
+    scratchpad,
+    state,
     onCommand: onDashboardCmd,
   };
 }

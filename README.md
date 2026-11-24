@@ -26,12 +26,14 @@ Chỉ cần **duy nhất 1 key tùy chọn** cho Jev (không còn dùng CrowLLM,
 
 ### Chạy trực tiếp (Windows / Linux / macOS)
 
-1. Vào thế giới Minecraft → Esc → **Mở cho mạng LAN / Open to LAN** → ghi nhớ số cổng.
-2. Copy `config.example.json` thành `config.json`, sửa `host`, `port`, `username`, `owner`.
+1. Mở sẵn **Antigravity Desktop** (đã cài sẵn plugin **Minecraft Bot Companion** / `minecraft-bot-plugin` với sidecar **Minecraft Bot Bridge** tự chạy nền).
+2. Copy `config.example.json` thành `config.json` (mặc định bật `"version": "auto"` và `"autoDiscoverLan": true`).
 3. (Tuỳ chọn) Copy `.env.example` thành `.env` và điền `TYPESAFE_API_KEY`.
-4. Kiểm tra và chạy:
-   - Windows: chạy `run.bat` hoặc `node src/index.js --doctor` → `node src/index.js`
+4. Khởi động bot trước hoặc sau khi mở game đều được:
+   - Windows: chạy `run.bat` (hỗ trợ tự dò cổng LAN hoặc gõ domain `*.e4mc.link` thẳng vào CMD)
    - Linux / macOS: chạy `./run.sh` (hoặc `sh run.sh`)
+   - Chạy thủ công / kết nối `e4mc`: `node src/index.js --port <cổng>` hoặc `node src/index.js --e4mc <domain.e4mc.link> [--auth microsoft]` / kiểm tra hệ thống: `node src/index.js --doctor`
+5. Vào thế giới Minecraft bất kỳ (`1.8.8` → `1.21.11+`, Vanilla / OptiFine / Sodium / **Fabric** có đồng bộ **Fabric Registry Sync**) → Esc → **Mở cho mạng LAN / Open to LAN** (hoặc gửi domain `e4mc`) — bot tự bắt kết nối, tự nhận diện phiên bản, tách SQLite memory theo từng thế giới (`data/worlds/`) và tự đánh thức Antigravity khi bạn chat.
 
 ### Chạy bằng Docker Compose
 
@@ -50,9 +52,9 @@ Bot cung cấp Stdio MCP Server tại `src/mcp/server.js` (chạy qua `npm run m
 
 1. Đảm bảo `dashboard.enabled: true` trong `config.json` (mặc định bật tại `http://127.0.0.1:3000`).
 2. Đăng ký server `minecraft-bot` trong `~/.gemini/config/mcp_config.json` trỏ tới `node src/mcp/server.js` với `BOT_API_URL=http://127.0.0.1:3000` (nếu đặt `DASHBOARD_TOKEN`, truyền thêm `BOT_API_TOKEN`).
-3. **12 công cụ MCP:**
+3. **13 công cụ MCP:**
    - Quan sát & nhận lệnh: `mc_get_state`, `mc_get_nearby`, `mc_get_inbox`, `mc_wait_event`
-   - Lập kế hoạch & thực thi: `mc_plan_execute`, `mc_run_macro`, `mc_command`, `mc_smelt`
+   - Lập kế hoạch & thực thi: `mc_plan_execute`, `mc_run_macro`, `mc_command`, `mc_smelt`, `mc_scratchpad`
    - Tương tác & quản trị: `mc_say`, `mc_inventory`, `mc_control`, `mc_connect`
 
 ---
@@ -62,7 +64,7 @@ Bot cung cấp Stdio MCP Server tại `src/mcp/server.js` (chạy qua `npm run m
 - **Khẩn cấp / Di chuyển:** `!stop` (`đứng đây`), `!come` (`lại đây`), `!home` (`về nhà`), `!follow` (`theo tôi`, `tt`)
 - **Tọa độ & điểm đánh dấu:** `đi tới 100 64 -50`, `lưu điểm mỏ`, `đi tới mỏ`, `danh sách điểm`
 - **Nhà & đồ:** `đây là nhà`, `đây là rương`, `cất đồ`, `xem rương`, `lấy từ rương <sl> <đồ>`, `ngủ`, `nhặt đồ chết`
-- **Thu thập, chế tạo & nông trại:** `lấy 16 gỗ`, `chế tạo 1 cuốc sắt`, `nung 8 sắt`, `đào hầm 16`, `làm ruộng`, `đưa tôi 10 bánh mì`
+- **Thu thập, chế tạo & nông trại:** `lấy 16 gỗ`, `chế tạo 1 cuốc sắt`, `nung 8 sắt`, `đào hầm 16`, `làm ruộng`, `farm enderman [sl]`, `bật tự farm` / `tắt tự farm`, `đưa tôi 10 bánh mì` (khi nhắn lượng ước lượng như `chặt ít gỗ` / `chặt in ít gỗ` bot sẽ hỏi lại số lượng, chặt hết cả cây và giao đủ `>= số lượng`)
 - **Trang bị & xây dựng:** `trang bị`, `trạng thái`, `ăn`, `dọn túi`, `tắt đánh` / `bật đánh`, `dọn mặt bằng <file>`, `xây <file> [0|90|180|270]` → `xác nhận` / `hủy`
 
 Mọi câu chat tự nhiên, chào hỏi hoặc yêu cầu phức tạp sẽ đi thẳng vào `mc_get_inbox` (gắn nhãn `OWNER_TRUSTED` / `UNTRUSTED_PUBLIC_PLAYER`) để Antigravity xử lý và phân công.

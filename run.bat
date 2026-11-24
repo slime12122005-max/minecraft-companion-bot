@@ -18,18 +18,19 @@ if not exist "config.json" (
     if exist "config.example.json" copy /y "config.example.json" "config.json" >nul
 )
 
-echo ========================================
-echo   BOT DONG HANH MINECRAFT - JAVA 1.21.1
-echo ========================================
-echo.
-set "LAN_PORT="
-set /p LAN_PORT="Nhap cong LAN Minecraft (bam Enter de dung cong trong config.json): "
+echo ========================================================
+echo   BOT DONG HANH MINECRAFT - AUTO LAN ^& AUTO VERSION
+echo ========================================================
+echo  - Tu dong do cong Open to LAN ^& nhan dien phien ban (1.8.8 - 1.21.x+)
+echo  - Mo san Antigravity Desktop (bat Minecraft Bot Companion - Gemini 4 Hydrogen Low) de chat tu nhien nhu nguoi that
+echo  - Co the go so cong LAN (vd: 59251) hoac domain e4mc (vd: xxx.e4mc.link) hoac lenh bot trong CMD bat ky luc nao
+echo ========================================================
 echo.
 
-if defined LAN_PORT (
-    "%NODE%" src/index.js --port "%LAN_PORT%"
+if "%~1"=="" (
+    "%NODE%" src/index.js --auto-lan --no-prompt
 ) else (
-    "%NODE%" src/index.js --no-prompt
+    "%NODE%" src/index.js %*
 )
 
 if errorlevel 1 (

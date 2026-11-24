@@ -22,16 +22,11 @@ if [ "$#" -gt 0 ]; then
   exec node src/index.js "$@"
 fi
 
-echo "========================================"
-echo "  BOT DONG HANH MINECRAFT - JAVA 1.21.1"
-echo "========================================"
+echo "========================================================"
+echo "  BOT DONG HANH MINECRAFT - AUTO LAN & AUTO VERSION"
+echo "========================================================"
+echo " - Tu dong do cong Open to LAN & nhan dien phien ban (1.8.8 - 1.21.x+)"
+echo " - Mo san Antigravity Desktop (bat Minecraft Bot Bridge) de chat la bot chay"
+echo "========================================================"
 
-if [ -t 0 ]; then
-  printf "Nhap cong LAN Minecraft (bam Enter de dung cong trong config.json): "
-  read -r LAN_PORT || LAN_PORT=""
-  if [ -n "$LAN_PORT" ]; then
-    exec node src/index.js --port "$LAN_PORT"
-  fi
-fi
-
-exec node src/index.js --no-prompt
+exec node src/index.js --auto-lan --no-prompt

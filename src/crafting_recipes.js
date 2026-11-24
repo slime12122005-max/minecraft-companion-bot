@@ -1,4 +1,4 @@
-import { normalizeText } from './commands.js';
+import { cleanTargetPhrase, normalizeText } from './commands.js';
 
 export const CRAFT_ALIASES = {
   'ban che tao': 'crafting_table',
@@ -10,8 +10,10 @@ export const CRAFT_ALIASES = {
   giuong: 'white_bed',
   bed: 'white_bed',
   duoc: 'torch',
+  'cay duoc': 'torch',
   torch: 'torch',
   gay: 'stick',
+  que: 'stick',
   stick: 'stick',
   'van go': 'oak_planks',
   van: 'oak_planks',
@@ -27,9 +29,13 @@ export const CRAFT_ALIASES = {
   'banh mi': 'bread',
   bread: 'bread',
   'cuoc go': 'wooden_pickaxe',
+  'cup go': 'wooden_pickaxe',
   'cuoc da': 'stone_pickaxe',
+  'cup da': 'stone_pickaxe',
   'cuoc sat': 'iron_pickaxe',
+  'cup sat': 'iron_pickaxe',
   'cuoc kim cuong': 'diamond_pickaxe',
+  'cup kim cuong': 'diamond_pickaxe',
   'kiem go': 'wooden_sword',
   'kiem da': 'stone_sword',
   'kiem sat': 'iron_sword',
@@ -49,6 +55,9 @@ export const CRAFT_ALIASES = {
   'giap kim cuong': 'diamond_chestplate',
   'quan kim cuong': 'diamond_leggings',
   'giay kim cuong': 'diamond_boots',
+  'mu vang': 'golden_helmet',
+  'kien rom': 'hay_block',
+  'lua mi': 'wheat',
 };
 
 export const SMELT_ALIASES = {
@@ -60,10 +69,20 @@ export const SMELT_ALIASES = {
   copper: ['raw_copper', 'copper_ore'],
   thit: ['beef', 'porkchop', 'chicken', 'mutton', 'rabbit'],
   bo: ['beef'],
+  cooked_beef: ['beef'],
   heo: ['porkchop'],
+  cooked_porkchop: ['porkchop'],
   ga: ['chicken'],
+  cooked_chicken: ['chicken'],
   cuu: ['mutton'],
+  cooked_mutton: ['mutton'],
+  cooked_rabbit: ['rabbit'],
   ca: ['cod', 'salmon'],
+  cooked_cod: ['cod'],
+  cooked_salmon: ['salmon'],
+  potato: ['potato'],
+  'khoai tay': ['potato'],
+  baked_potato: ['potato'],
   cat: ['sand', 'red_sand'],
   sand: ['sand', 'red_sand'],
   da: ['cobblestone', 'stone'],
@@ -128,10 +147,16 @@ const STANDARD_RECIPES = {
   iron_chestplate: { yields: 1, table: true, ingredients: { iron_ingot: 8 } },
   iron_leggings: { yields: 1, table: true, ingredients: { iron_ingot: 7 } },
   iron_boots: { yields: 1, table: true, ingredients: { iron_ingot: 4 } },
+  golden_helmet: { yields: 1, table: true, ingredients: { gold_ingot: 5 } },
+  diamond_helmet: { yields: 1, table: true, ingredients: { diamond: 5 } },
+  diamond_chestplate: { yields: 1, table: true, ingredients: { diamond: 8 } },
+  diamond_leggings: { yields: 1, table: true, ingredients: { diamond: 7 } },
+  diamond_boots: { yields: 1, table: true, ingredients: { diamond: 4 } },
+  wheat: { yields: 9, table: false, ingredients: { hay_block: 1 } },
 };
 
 export function resolveCraftName(targetText, botRegistry = null, inventoryItems = []) {
-  const norm = normalizeText(targetText);
+  const norm = cleanTargetPhrase(normalizeText(targetText).replace(/^\d+\s+(?=\S)/, ''));
   if (!norm) return null;
   if (norm === 'van go' || norm === 'van' || norm === 'planks') {
     for (const item of inventoryItems) {
@@ -148,10 +173,12 @@ export function resolveCraftName(targetText, botRegistry = null, inventoryItems 
 }
 
 export function resolveSmeltInputs(targetText) {
-  const norm = normalizeText(targetText);
+  const norm = cleanTargetPhrase(normalizeText(targetText).replace(/^\d+\s+(?=\S)/, ''));
   if (!norm) return [];
   if (SMELT_ALIASES[norm]) return SMELT_ALIASES[norm];
   const snake = norm.replace(/\s+/g, '_');
+  if (SMELT_ALIASES[snake]) return SMELT_ALIASES[snake];
+  if (SMELT_OUTPUT_TO_INPUT[snake]) return SMELT_OUTPUT_TO_INPUT[snake].inputs;
   return [snake];
 }
 

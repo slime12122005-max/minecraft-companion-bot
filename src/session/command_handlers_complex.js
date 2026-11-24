@@ -7,11 +7,20 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
 
   const runPrepare = async (spec) => {
     let done = false;
+    if (!parentSignal) {
+      ctx.scratchpad?.startSingleCommand(
+        { type: 'prepare', file: spec.file, rotation: spec.rotation ?? 0 },
+        { buildSpec: spec, resumingRecovery: Boolean(chatCtx?.resumingRecovery) }
+      );
+    }
     say(`Bắt đầu dọn mặt bằng cho ${spec.file} tại ${spec.x}, ${spec.y}, ${spec.z}.`, { kind: 'start', isStale: () => done });
     await ctx.runStepTask({ name: 'don_mat_bang', reason: 'Xác nhận dọn mặt bằng', file: spec.file }, async (signal) => {
       try {
         const res = await builder.prepare(spec, signal);
         done = true;
+        if (!signal.aborted && !parentSignal) {
+          ctx.scratchpad?.completeActive();
+        }
         await say(`Đã dọn mặt bằng xong (${res.bounds} ô: dọn ${res.cleared}, lấp ${res.filled}, giữ ${res.protected}).`, { kind: 'final' });
       } finally {
         done = true;
@@ -21,12 +30,21 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
 
   const runBuild = async (spec) => {
     let done = false;
+    if (!parentSignal) {
+      ctx.scratchpad?.startSingleCommand(
+        { type: 'build', file: spec.file, rotation: spec.rotation ?? 0 },
+        { buildSpec: spec, resumingRecovery: Boolean(chatCtx?.resumingRecovery) }
+      );
+    }
     say(`Bắt đầu xây ${spec.file} tại ${spec.x}, ${spec.y}, ${spec.z}.`, { kind: 'start', isStale: () => done });
     await ctx.runStepTask({ name: 'xay_dung', reason: 'Xác nhận xây dựng', file: spec.file }, async (signal) => {
       try {
         await ctx.restockBuildMaterials(spec, signal, reply);
         const res = await builder.build(spec, signal);
         done = true;
+        if (!signal.aborted && !parentSignal) {
+          ctx.scratchpad?.completeActive();
+        }
         await say(`Đã xây xong ${res.placed}/${res.total} block.`, { kind: 'final' });
       } finally {
         done = true;
@@ -59,14 +77,16 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
       try {
         const info = await builder.inspect(parsed.file);
         if (!bot.entity?.position) { await say('Bot chưa vào thế giới.', { kind: 'error' }); return true; }
-        const origin = {
-          x: Math.round(bot.entity.position.x) + 2,
-          y: Math.round(bot.entity.position.y),
-          z: Math.round(bot.entity.position.z) + 2,
-        };
+        const origin = chatCtx?.buildSpec
+          ? { x: chatCtx.buildSpec.x, y: chatCtx.buildSpec.y, z: chatCtx.buildSpec.z }
+          : {
+              x: Math.round(bot.entity.position.x) + 2,
+              y: Math.round(bot.entity.position.y),
+              z: Math.round(bot.entity.position.z) + 2,
+            };
         const spec = { mode: 'prepare', file: parsed.file, rotation: parsed.rotation, ...origin, confirmed: true };
         state.pendingAction = null;
-        if (ctx.config?.building?.confirmTerrainChange === false) {
+        if (chatCtx?.buildSpec || ctx.config?.building?.confirmTerrainChange === false) {
           state.pendingBuild = null;
           await runPrepare(spec);
           return true;
@@ -83,14 +103,16 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
       try {
         const info = await builder.inspect(parsed.file);
         if (!bot.entity?.position) { await say('Bot chưa vào thế giới.', { kind: 'error' }); return true; }
-        const origin = {
-          x: Math.round(bot.entity.position.x) + 2,
-          y: Math.round(bot.entity.position.y),
-          z: Math.round(bot.entity.position.z) + 2,
-        };
+        const origin = chatCtx?.buildSpec
+          ? { x: chatCtx.buildSpec.x, y: chatCtx.buildSpec.y, z: chatCtx.buildSpec.z }
+          : {
+              x: Math.round(bot.entity.position.x) + 2,
+              y: Math.round(bot.entity.position.y),
+              z: Math.round(bot.entity.position.z) + 2,
+            };
         const spec = { mode: 'build', file: parsed.file, rotation: parsed.rotation, ...origin };
         state.pendingAction = null;
-        if (ctx.config?.building?.confirmTerrainChange === false) {
+        if (chatCtx?.buildSpec || ctx.config?.building?.confirmTerrainChange === false) {
           state.pendingBuild = null;
           await runBuild(spec);
           return true;
@@ -133,6 +155,12 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
       const steps = parsed.steps ?? [];
       if (steps.length === 0) return true;
       const outcomes = [];
+      if (!parentSignal) {
+        ctx.scratchpad?.startChain(steps, {
+          userMessage: chatCtx?.userMessage ?? '',
+          resumingRecovery: Boolean(chatCtx?.resumingRecovery),
+        });
+      }
       if (!chatCtx?.onOutcome) {
         reply(`Bắt đầu chuỗi ${steps.length} bước.`);
       }
@@ -159,6 +187,9 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
           if (!step || step.type === 'unknown' || step.type === 'chain') continue;
           try {
             await ctx.dispatchParsedCommand(step, username, reply, signal, stepCtx);
+            if (!signal.aborted && !parentSignal) {
+              ctx.scratchpad?.markChainStepDone(i);
+            }
           } catch (err) {
             if (err?.name === 'ReadinessBlocked') {
               if (!err.hard) {
@@ -167,7 +198,7 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
                 state.pendingAction = {
                   parsed: remainingSteps.length === 1 ? remainingSteps[0] : { type: 'chain', steps: remainingSteps },
                   username,
-                  chatCtx: { userMessage: chatCtx?.userMessage ?? '', ignoreFood: true },
+                  chatCtx: { userMessage: chatCtx?.userMessage ?? '', ignoreFood: true, resumingRecovery: Boolean(chatCtx?.resumingRecovery) },
                   expiresAt: Date.now() + 120000,
                 };
               }
@@ -176,6 +207,9 @@ export async function handleComplexCommand(ctx, parsed, { username, reply, paren
             }
             throw err;
           }
+        }
+        if (!signal.aborted && !parentSignal) {
+          ctx.scratchpad?.completeActive();
         }
         if (!signal.aborted && !chatCtx?.onOutcome) {
           reply('Đã hoàn thành chuỗi nhiệm vụ.');

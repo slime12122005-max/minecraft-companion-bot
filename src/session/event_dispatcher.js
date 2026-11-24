@@ -2,7 +2,8 @@ import pf from 'mineflayer-pathfinder';
 const { goals } = pf;
 import { SESSION_STATES } from './state_machine.js';
 import { configureMovements, formatError } from './task_helpers.js';
-import { findSafeSleepBed } from '../survival/index.js';
+import { explainConnectionIssue, formatMinecraftReason } from './lan_discovery.js';
+import { findSafeSleepBed, isSafeSleepDimension } from '../survival/index.js';
 import { TASK_TIERS } from '../tasks.js';
 
 export function bindSessionEvents(ctx) {
@@ -26,16 +27,43 @@ export function bindSessionEvents(ctx) {
   } = ctx;
 
   let disposed = false;
+  let recoveryTimer = null;
 
   const onFirstSpawn = () => {
     if (disposed) return;
     logFor('bot')(`✅ Bot ${bot.username} đã vào thế giới ${bot.version}`);
+    const recoveryMsg = ctx.scratchpad?.formatRecoverySummary?.({ ownerName: config.owner });
+    if (recoveryMsg) {
+      logFor('scratchpad')(recoveryMsg);
+      ctx.pushInbox?.({
+        kind: 'alert',
+        alertType: 'crash_recovery',
+        role: 'SYSTEM',
+        severity: 'info',
+        username: bot.username,
+        message: recoveryMsg,
+        scratchpad: ctx.scratchpad.snapshot(),
+      });
+      const announce = () => {
+        if (disposed || state.disconnected) return;
+        bot.chat?.(recoveryMsg);
+        ctx.pushChatHistory?.('assistant', recoveryMsg);
+      };
+      if (ctx.loadPlugins === false) {
+        announce();
+      } else {
+        recoveryTimer = setTimeout(announce, 600);
+        recoveryTimer.unref?.();
+      }
+    }
   };
 
   const onSpawn = () => {
     if (disposed) return;
     state.connected = true;
     state.disconnected = false;
+    state.stayPut = false;
+    state.idleGoalActive = false;
     ctx.pushInbox?.({
       kind: 'spawn',
       role: 'SYSTEM',
@@ -51,11 +79,18 @@ export function bindSessionEvents(ctx) {
       activeTask: Boolean(tasks.active && !tasks.paused),
     });
     configureMovements(bot);
-    const death = survival.getPendingDeathRecovery({ currentDimension: bot.game?.dimension });
-    if (death && !tasks.active) {
-      ctx.startDeathRecoveryTask(death, (msg) => {
-        ctx.replyHuman(msg, { replyFn: (t) => bot.chat(t) }).catch(() => {});
-      });
+    const rawDeath = memory.get('lastDeath');
+    if (rawDeath && !tasks.active) {
+      if (rawDeath.dimension && bot.game?.dimension && String(rawDeath.dimension) !== String(bot.game.dimension)) {
+        const itemDespawnMs = config.survival?.itemDespawnMs ?? 300000;
+        if (Date.now() - Number(rawDeath.diedAt ?? 0) >= itemDespawnMs) {
+          survival.clearDeath();
+        }
+      } else {
+        ctx.startDeathRecoveryTask(rawDeath, (msg) => {
+          ctx.replyHuman(msg, { replyFn: (t) => bot.chat(t) }).catch(() => {});
+        });
+      }
     }
   };
 
@@ -91,6 +126,9 @@ export function bindSessionEvents(ctx) {
     if (combat.busy || bot.isSleeping) return;
     const bed = findSafeSleepBed(bot, entity, 16);
     if (!bed) return;
+    if (isSafeSleepDimension(bot.game?.dimension)) {
+      ctx.home?.autoSetFromBed?.(bed?.position ?? entity.position, bot.game?.dimension ?? 'overworld');
+    }
     ctx.stopCurrentTask('Ngủ cùng chủ');
     const run = tasks.run({ name: 'ngu_cung_chu' }, async (signal) => {
       if (bot.entity?.position && bed.position && bot.entity.position.distanceTo(bed.position) > 3.5) {
@@ -162,8 +200,12 @@ export function bindSessionEvents(ctx) {
         digging: Boolean(bot.targetDigBlock),
         sleeping: Boolean(bot.isSleeping),
         activeTask: Boolean(tasks.active && !tasks.paused && !isStationaryFollow),
-        exempt: Boolean(state.aiPaused || combat.busy || survival.busy || bot.currentWindow),
+        exempt: Boolean(state.aiPaused || combat.busy || survival.busy || bot.currentWindow || combat.shelterHoldPos),
       });
+
+      if ((tasks.active || combat.busy || survival.busy) && state.idleGoalActive) {
+        ctx.companion?.stopIdleMotion?.();
+      }
 
       if (!state.aiPaused) {
         await survival.handleHazards();
@@ -314,12 +356,14 @@ export function bindSessionEvents(ctx) {
         }
         if (!survival.busy && !combat.busy && !combat.shieldActive && !combat.bowCharging && !bot.currentWindow) {
           await equipment.maintainArmorAndShield();
-          if (
-            equipment.discardObsolete &&
-            typeof bot.inventory?.emptySlotCount === 'function' &&
-            bot.inventory.emptySlotCount() <= 3
-          ) {
+          const emptySlots = typeof bot.inventory?.emptySlotCount === 'function'
+            ? bot.inventory.emptySlotCount()
+            : 99;
+          if (equipment.discardObsolete && emptySlots <= 3) {
             await equipment.discardObsoleteItems();
+          }
+          if (equipment.discardObsolete && emptySlots <= 12 && typeof equipment.discardJunkItems === 'function') {
+            await equipment.discardJunkItems({ blockStacks: config.inventory?.blockStacks ?? 2 });
           }
         }
         ctx.humanizer?.updateIdleGaze?.(now, {
@@ -331,6 +375,16 @@ export function bindSessionEvents(ctx) {
           moving: Boolean(bot.pathfinder?.isMoving?.()),
           windowOpen: Boolean(bot.currentWindow),
         });
+        const idleFarmOwner = bot.players?.[config.owner]?.entity ?? null;
+        if (tasks.active?.task?.autoFarm && idleFarmOwner?.position) {
+          const ownerDist = bot.entity.position.distanceTo(idleFarmOwner.position);
+          if (ownerDist > 28 && ownerDist <= 80) {
+            ctx.stopCurrentTask('Chủ di chuyển xa, tạm dừng tự farm để đi theo');
+          }
+        }
+        if (!combat.busy && !survival.busy && !tasks.active && !bot.isSleeping && !bot.currentWindow) {
+          await ctx.companion?.tickIdle?.(now);
+        }
         for (const alert of survival.checkHealthAlerts({ ownerName: config.owner })) {
           bot.chat(alert);
           ctx.pushInbox?.({
@@ -411,7 +465,7 @@ export function bindSessionEvents(ctx) {
           });
         }
         if (!combat.busy && !tasks.active) {
-          survival.pickupNearbyItem();
+          survival.pickupNearbyItem({ stayPut: state.stayPut });
           if (!survival.busy && ctx.smelting?.hasReadyJob?.({ maxDistance: 32 })) {
             const run = tasks.run(
               { name: 'thu_lo_nung' },
@@ -420,7 +474,11 @@ export function bindSessionEvents(ctx) {
             );
             run?.promise?.catch?.(() => {});
           }
-          const cond = survival.checkAutoReturnCondition({ busy: combat.busy || !!tasks.active });
+          const ownerEntity = bot.players?.[config.owner]?.entity ?? null;
+          const cond = survival.checkAutoReturnCondition({
+            busy: combat.busy || !!tasks.active,
+            ownerEntity,
+          });
           if (cond) {
             bot.chat(`Tôi tự về nhà vì ${cond.reason}.`);
             ctx.startGoHomeTask((msg) => bot.chat(msg), { background: true });
@@ -432,19 +490,37 @@ export function bindSessionEvents(ctx) {
     } finally {
       combatTicking = false;
     }
-  }, 250);
+  }, 100);
   loop.unref?.();
 
-  const onError = err => errorFor('bot', formatError(err));
-  const onKicked = reason => {
+  let lastFabricParseWarnAt = 0;
+  const onError = (err) => {
+    const errText = formatError(err);
+    if (bot._fabricModded && /^Parse error for play\.toClient/i.test(errText)) {
+      const now = Date.now();
+      if (now - lastFabricParseWarnAt >= 30000) {
+        lastFabricParseWarnAt = now;
+        warnFor('fabric', `⚠️ Bỏ qua gói mod không chuẩn: ${errText}`);
+      }
+      return;
+    }
+    errorFor('bot', errText);
+    const diag = explainConnectionIssue(err, config);
+    if (diag) warnFor('bot', `💡 ${diag.hint}`);
+  };
+  const onKicked = (reason) => {
     if (disposed) return;
+    const readableReason = formatMinecraftReason(reason);
+    const diag = explainConnectionIssue(reason, config);
     ctx.pushInbox?.({
       kind: 'kicked',
       role: 'SYSTEM',
       username: bot.username,
-      message: typeof reason === 'string' ? reason : JSON.stringify(reason),
+      message: readableReason,
+      ...(diag ? { issueCode: diag.code, hint: diag.hint } : {}),
     });
-    warnFor('bot', 'Bị kick:', reason);
+    warnFor('bot', `Bị kick: ${readableReason}`);
+    if (diag) warnFor('bot', `💡 ${diag.hint}`);
   };
 
   bot.on('error', onError);
@@ -452,6 +528,10 @@ export function bindSessionEvents(ctx) {
 
   async function cleanup() {
     disposed = true;
+    if (recoveryTimer) {
+      clearTimeout(recoveryTimer);
+      recoveryTimer = null;
+    }
     clearInterval(loop);
     const detach = (event, fn) => {
       if (typeof bot.off === 'function') bot.off(event, fn);
@@ -467,7 +547,9 @@ export function bindSessionEvents(ctx) {
     detach('error', onError);
     detach('kicked', onKicked);
     combat.stop();
+    ctx.fabricCompat?.detach?.();
     survival.stopUnstuck?.();
+    ctx.companion?.dispose?.();
     ctx.humanizer?.dispose?.();
     ctx.stopCurrentTask('Ngắt kết nối', { clearQueue: true });
     if (!externalDashboard) {

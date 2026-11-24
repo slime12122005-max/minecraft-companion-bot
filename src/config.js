@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { isE4mcHost, parseServerAddress } from './session/lan_discovery.js';
 
 export const DEFAULT_CONFIG = {
   minecraft: {
@@ -7,6 +8,7 @@ export const DEFAULT_CONFIG = {
     port: 55916,
     username: 'bot_dong_hanh',
     version: '1.21.1',
+    autoDiscoverLan: false,
   },
   owner: 'araslime',
   llm: {
@@ -54,6 +56,8 @@ export const DEFAULT_CONFIG = {
   survival: {
     requireFood: true,
     minFoodPoints: 20,
+    maxDeathRecoverDistance: 350,
+    itemDespawnMs: 300000,
   },
   humanizer: {
     enabled: true,
@@ -79,15 +83,41 @@ export const DEFAULT_CONFIG = {
     host: '127.0.0.1',
     port: 3000,
   },
+  companion: {
+    agentModel: 'gemini-4-hydrogen-low',
+    naturalChat: true,
+    chatFallbackDelayMs: 550,
+    mcpGraceMs: 8500,
+    idleLife: false,
+    idleFollowRange: 6.5,
+    idleWanderIntervalMs: 14000,
+    ambientChatter: true,
+    autoUpgrade: true,
+    autoFarm: true,
+  },
 };
+
+export function resolveMineflayerVersion(version) {
+  if (version === false) return false;
+  const v = String(version ?? '').trim();
+  if (!v || v.toLowerCase() === 'auto' || v.toLowerCase() === 'false') return false;
+  return v;
+}
 
 const ConfigSchema = z.object({
   minecraft: z.object({
     host: z.string().min(1),
     port: z.number().int().min(1).max(65535),
-    username: z.string().min(1).max(16),
-    version: z.string().min(1),
-  }),
+    username: z.string().min(1).max(120),
+    version: z.union([z.string().min(1), z.literal(false)]),
+    auth: z.enum(['offline', 'microsoft']).optional(),
+    profilesFolder: z.string().min(1).optional(),
+    autoDiscoverLan: z.boolean().optional(),
+    worldName: z.string().nullable().optional(),
+  }).refine(
+    (mc) => mc.auth === 'microsoft' || mc.username.length <= 16,
+    { message: 'Username tối đa 16 ký tự ở chế độ offline', path: ['username'] }
+  ),
   owner: z.string().min(1),
   llm: z.object({
     provider: z.string().optional(),
@@ -136,6 +166,8 @@ const ConfigSchema = z.object({
   survival: z.object({
     requireFood: z.boolean().optional(),
     minFoodPoints: z.number().int().nonnegative().optional(),
+    maxDeathRecoverDistance: z.number().positive().optional(),
+    itemDespawnMs: z.number().int().positive().optional(),
   }).optional(),
   humanizer: z.object({
     enabled: z.boolean(),
@@ -163,6 +195,19 @@ const ConfigSchema = z.object({
     port: z.number().int().min(1).max(65535),
     token: z.string().optional(),
   }).optional(),
+  companion: z.object({
+    agentModel: z.string().min(1),
+    naturalChat: z.boolean(),
+    chatFallbackDelayMs: z.number().int().nonnegative(),
+    mcpGraceMs: z.number().int().nonnegative(),
+    idleLife: z.boolean(),
+    idleFollowRange: z.number().positive(),
+    idleWanderIntervalMs: z.number().int().positive(),
+    ambientChatter: z.boolean(),
+    autoUpgrade: z.boolean(),
+    autoFarm: z.boolean(),
+    preserveInTests: z.boolean(),
+  }).partial().optional(),
 }).passthrough();
 
 function isPlainObject(value) {
@@ -196,23 +241,40 @@ export function loadConfig(configPath = 'config.json', { env = process.env } = {
 
   const merged = deepMerge(DEFAULT_CONFIG, parsed);
 
+  const hasExplicitEnvPort = Boolean(
+    env &&
+    env.MINECRAFT_PORT != null &&
+    String(env.MINECRAFT_PORT).trim() !== '' &&
+    Number.isInteger(Number(env.MINECRAFT_PORT)) &&
+    Number(env.MINECRAFT_PORT) >= 1 &&
+    Number(env.MINECRAFT_PORT) <= 65535
+  );
+  const hasExplicitFilePort = parsed?.minecraft?.port != null;
+
   if (env) {
     merged.minecraft = merged.minecraft ?? { ...DEFAULT_CONFIG.minecraft };
+    const envAuth = env.MINECRAFT_AUTH != null ? String(env.MINECRAFT_AUTH).trim().toLowerCase() : '';
+    if (envAuth === 'offline' || envAuth === 'microsoft') {
+      merged.minecraft.auth = envAuth;
+    }
     if (env.MINECRAFT_HOST && String(env.MINECRAFT_HOST).trim()) {
       merged.minecraft.host = String(env.MINECRAFT_HOST).trim();
     }
-    if (env.MINECRAFT_PORT != null && String(env.MINECRAFT_PORT).trim() !== '') {
-      const mcPort = Number(env.MINECRAFT_PORT);
-      if (Number.isInteger(mcPort) && mcPort >= 1 && mcPort <= 65535) {
-        merged.minecraft.port = mcPort;
-      }
+    if (hasExplicitEnvPort) {
+      merged.minecraft.port = Number(env.MINECRAFT_PORT);
     }
     if (env.MINECRAFT_USERNAME && String(env.MINECRAFT_USERNAME).trim()) {
-      merged.minecraft.username = String(env.MINECRAFT_USERNAME).trim().slice(0, 16);
+      const maxLen = merged.minecraft.auth === 'microsoft' ? 120 : 16;
+      merged.minecraft.username = String(env.MINECRAFT_USERNAME).trim().slice(0, maxLen);
     }
     if (env.MINECRAFT_VERSION && String(env.MINECRAFT_VERSION).trim()) {
       merged.minecraft.version = String(env.MINECRAFT_VERSION).trim();
     }
+    const envAutoLan = env.MINECRAFT_AUTO_DISCOVER_LAN != null
+      ? String(env.MINECRAFT_AUTO_DISCOVER_LAN).trim().toLowerCase()
+      : '';
+    if (envAutoLan === 'true' || envAutoLan === '1') merged.minecraft.autoDiscoverLan = true;
+    else if (envAutoLan === 'false' || envAutoLan === '0') merged.minecraft.autoDiscoverLan = false;
     if (env.MINECRAFT_OWNER && String(env.MINECRAFT_OWNER).trim()) {
       merged.owner = String(env.MINECRAFT_OWNER).trim().slice(0, 16);
     }
@@ -233,6 +295,26 @@ export function loadConfig(configPath = 'config.json', { env = process.env } = {
     }
     if (env.DASHBOARD_TOKEN && String(env.DASHBOARD_TOKEN).trim()) {
       merged.dashboard.token = String(env.DASHBOARD_TOKEN).trim();
+    }
+    if (env.BOT_AGENT_MODEL && String(env.BOT_AGENT_MODEL).trim()) {
+      merged.companion = merged.companion ?? { ...DEFAULT_CONFIG.companion };
+      merged.companion.agentModel = String(env.BOT_AGENT_MODEL).trim();
+    }
+  }
+
+  const normalizedAddr = parseServerAddress(merged.minecraft.host, {
+    defaultPort: merged.minecraft.port || 25565,
+  });
+  if (normalizedAddr?.host) {
+    merged.minecraft.host = normalizedAddr.host;
+    if (normalizedAddr.explicitPort && !hasExplicitEnvPort) {
+      merged.minecraft.port = normalizedAddr.port;
+    } else if (
+      normalizedAddr.isE4mc &&
+      !hasExplicitEnvPort &&
+      (!hasExplicitFilePort || (env?.MINECRAFT_HOST && !isE4mcHost(parsed?.minecraft?.host)))
+    ) {
+      merged.minecraft.port = 25565;
     }
   }
 

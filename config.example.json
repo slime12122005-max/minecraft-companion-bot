@@ -3,7 +3,8 @@
     "host": "localhost",
     "port": 55916,
     "username": "bot_dong_hanh",
-    "version": "1.21.1"
+    "version": "auto",
+    "autoDiscoverLan": true
   },
   "owner": "araslime",
   "llm": {
@@ -31,7 +32,7 @@
   "inventory": {
     "blockStacks": 2,
     "keepFood": 16,
-    "discardObsolete": false
+    "discardObsolete": true
   },
   "building": {
     "confirmTerrainChange": true,
@@ -47,7 +48,9 @@
   },
   "survival": {
     "requireFood": true,
-    "minFoodPoints": 20
+    "minFoodPoints": 20,
+    "maxDeathRecoverDistance": 350,
+    "itemDespawnMs": 300000
   },
   "humanizer": {
     "enabled": true,
@@ -55,15 +58,28 @@
     "idleGaze": true,
     "socialGestures": true,
     "chatTypingDelay": true,
-    "typingMsPerChar": 26,
-    "maxChatDelayMs": 1600,
+    "typingBaseMs": 140,
+    "typingMsPerChar": 14,
+    "maxChatDelayMs": 900,
     "personalSpace": 3,
     "combatStrafe": true,
-    "attackJitterMs": 55
+    "attackJitterMs": 25
   },
   "dashboard": {
     "enabled": true,
     "host": "127.0.0.1",
     "port": 3000
+  },
+  "companion": {
+    "agentModel": "gemini-4-hydrogen-low",
+    "naturalChat": true,
+    "chatFallbackDelayMs": 550,
+    "mcpGraceMs": 8500,
+    "idleLife": true,
+    "idleFollowRange": 6.5,
+    "idleWanderIntervalMs": 14000,
+    "ambientChatter": true,
+    "autoUpgrade": true,
+    "autoFarm": true
   }
 }

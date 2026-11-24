@@ -13,9 +13,9 @@ const DEFAULT_HUMANIZER_CONFIG = Object.freeze({
   maxChatDelayMs: 1600,
   personalSpace: 3,
   combatStrafe: true,
-  strafeDurationMs: 200,
+  strafeDurationMs: 140,
   strafeCooldownMs: 650,
-  attackJitterMs: 55,
+  attackJitterMs: 25,
 });
 
 export function shortestAngleDelta(from, to) {
@@ -38,6 +38,38 @@ export function computeYawPitch(fromPos, targetPos, eyeHeight = 1.62) {
   const yaw = Math.atan2(-dx, -dz);
   const pitch = Math.atan2(dy, horiz || 1e-6);
   return { yaw, pitch };
+}
+
+export function wouldTriggerEnderman(bot, fromPos, targetPos) {
+  if (!bot || !fromPos || !targetPos) return false;
+  const ox = fromPos.x;
+  const oy = fromPos.y + 1.62;
+  const oz = fromPos.z;
+  const rdx = targetPos.x - ox;
+  const rdy = targetPos.y - oy;
+  const rdz = targetPos.z - oz;
+  const rLen = Math.hypot(rdx, rdy, rdz);
+  if (rLen < 1e-4) return false;
+  const ux = rdx / rLen;
+  const uy = rdy / rLen;
+  const uz = rdz / rLen;
+
+  for (const e of Object.values(bot.entities ?? {})) {
+    if (!e?.position) continue;
+    const name = String(e.name ?? '').toLowerCase();
+    if (name !== 'enderman') continue;
+    if (e.target && e.target === bot.entity) continue;
+    const vx = e.position.x - ox;
+    const vy = (e.position.y + 2.5) - oy;
+    const vz = e.position.z - oz;
+    const vLenSq = vx * vx + vy * vy + vz * vz;
+    if (vLenSq > 32 * 32) continue;
+    const t = vx * ux + vy * uy + vz * uz;
+    if (t <= 0.5 || t > 32) continue;
+    const perpSq = Math.max(0, vLenSq - t * t);
+    if (Math.sqrt(perpSq) <= 0.75) return true;
+  }
+  return false;
 }
 
 export function computeTypingDelayMs(text, {
@@ -76,6 +108,7 @@ export class MotorHumanizer {
     this._activeStrafeKey = null;
     this._strafeTimer = null;
     this._wtapTimer = null;
+    this._wtapSprintActive = false;
   }
 
   async smoothLookAt(targetPos, {
@@ -86,6 +119,9 @@ export class MotorHumanizer {
     signal = null,
   } = {}) {
     if (!targetPos || this.disposed || signal?.aborted) return;
+    const safeTargetPos = !urgent && this.bot?.entity?.position && wouldTriggerEnderman(this.bot, this.bot.entity.position, targetPos)
+      ? { x: targetPos.x, y: targetPos.y - 1.8, z: targetPos.z }
+      : targetPos;
     if (
       !this.config.enabled ||
       !this.config.smoothLook ||
@@ -94,13 +130,13 @@ export class MotorHumanizer {
       !this.bot?.entity?.position
     ) {
       try {
-        await this.bot?.lookAt?.(targetPos, Boolean(urgent));
+        await this.bot?.lookAt?.(safeTargetPos, Boolean(urgent));
       } catch {}
       return;
     }
 
     const gen = ++this._lookGen;
-    const { yaw: targetYaw, pitch: targetPitch } = computeYawPitch(this.bot.entity.position, targetPos);
+    const { yaw: targetYaw, pitch: targetPitch } = computeYawPitch(this.bot.entity.position, safeTargetPos);
     const jy = (this.random() * 2 - 1) * jitterRad;
     const jp = (this.random() * 2 - 1) * (jitterRad * 0.6);
     const clampedPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, targetPitch + jp));
@@ -295,8 +331,8 @@ export class MotorHumanizer {
       isCreeper ||
       inWater ||
       !onGround ||
-      distance < 1.8 ||
-      distance > 3.8 ||
+      distance < 1.6 ||
+      distance > 3.0 ||
       typeof this.bot?.setControlState !== 'function'
     ) {
       return null;
@@ -359,7 +395,10 @@ export class MotorHumanizer {
     try { this.bot.setControlState('sprint', false); } catch {}
     this._wtapTimer = setTimeout(() => {
       this._wtapTimer = null;
-      if (!this.disposed) {
+      if (this.disposed) return;
+      const movingForward = Boolean(this.bot.controlState?.forward || this.bot.pathfinder?.isMoving?.());
+      if (movingForward) {
+        this._wtapSprintActive = true;
         try { this.bot.setControlState('sprint', true); } catch {}
       }
     }, 65);
@@ -379,6 +418,10 @@ export class MotorHumanizer {
     if (this._activeStrafeKey && typeof this.bot?.setControlState === 'function') {
       try { this.bot.setControlState(this._activeStrafeKey, false); } catch {}
     }
+    if (this._wtapSprintActive && typeof this.bot?.setControlState === 'function') {
+      try { this.bot.setControlState('sprint', false); } catch {}
+    }
+    this._wtapSprintActive = false;
     this._activeStrafeKey = null;
   }
 

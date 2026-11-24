@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { parseServerAddress } from '../session/lan_discovery.js';
 
 const PUBLIC_DIR = new URL('./public/', import.meta.url);
 const INDEX_HTML = readFileSync(new URL('index.html', PUBLIC_DIR), 'utf8');
@@ -29,6 +30,7 @@ export class DashboardServer {
     onMacro = null,
     onPlanExecute = null,
     onSmelt = null,
+    onScratchpad = null,
     sseIntervalMs = 250,
     log = () => {},
   } = {}) {
@@ -46,6 +48,7 @@ export class DashboardServer {
     this.onMacro = onMacro;
     this.onPlanExecute = onPlanExecute;
     this.onSmelt = onSmelt;
+    this.onScratchpad = onScratchpad;
     this.sseIntervalMs = Math.max(50, Number(sseIntervalMs) || 250);
     this.log = log;
     this.server = null;
@@ -226,8 +229,9 @@ export class DashboardServer {
         const limit = Number.isInteger(rawLimit) && rawLimit > 0
           ? Math.max(1, Math.min(100, rawLimit))
           : 30;
+        const source = url.searchParams.get('source') || null;
         const inbox = this.getInbox
-          ? await this.getInbox({ sinceId, limit })
+          ? await this.getInbox({ sinceId, limit, source })
           : { latestId: 0, messages: [] };
         this._sendJson(res, 200, inbox);
         return;
@@ -242,6 +246,17 @@ export class DashboardServer {
           aiPaused: Boolean(s.aiPaused),
           watchdog: s.watchdog ?? null,
         });
+        return;
+      }
+
+      if (req.method === 'GET' && url.pathname === '/api/scratchpad') {
+        if (this.authToken && !this._hasValidToken(req, url)) {
+          return this._sendJson(res, 401, { ok: false, error: 'Unauthorized' });
+        }
+        const data = this.onScratchpad
+          ? await this.onScratchpad({ action: 'get' })
+          : { ok: true, action: 'get', scratchpad: null, summary: null };
+        this._sendJson(res, 200, data);
         return;
       }
 
@@ -279,22 +294,42 @@ export class DashboardServer {
         if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
         try {
           const body = await this._readJsonBody(req);
-          const host = String(body.host || 'localhost').trim();
-          const portNum = Number(body.port);
-          if (!VALID_HOST_RE.test(host)) {
+          const rawHost = body.host != null ? String(body.host).trim() : '';
+          const parsedAddr = rawHost ? parseServerAddress(rawHost, { defaultPort: 25565 }) : null;
+          if (rawHost && (!parsedAddr || !parsedAddr.host || !VALID_HOST_RE.test(parsedAddr.host))) {
             return this._sendJson(res, 400, { ok: false, error: 'Host không hợp lệ' });
           }
-          if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+
+          const hasExplicitPort = body.port != null && String(body.port).trim() !== '';
+          let portNum;
+          if (hasExplicitPort) {
+            const p = Number(body.port);
+            if (!Number.isInteger(p) || p < 1 || p > 65535) {
+              return this._sendJson(res, 400, { ok: false, error: 'Cổng LAN không hợp lệ (1-65535)' });
+            }
+            portNum = parsedAddr?.isE4mc && parsedAddr.explicitPort ? parsedAddr.port : p;
+          } else if (parsedAddr?.host) {
+            portNum = parsedAddr.port;
+          } else {
             return this._sendJson(res, 400, { ok: false, error: 'Cổng LAN không hợp lệ (1-65535)' });
           }
+
+          const host = parsedAddr?.host || 'localhost';
           if (this.onConnect) {
-            await this.onConnect({
+            const connectOpts = {
               host,
               port: portNum,
               owner: String(body.owner || '').trim().slice(0, 16),
-            });
+            };
+            const version = body.version != null ? String(body.version).trim().slice(0, 32) : '';
+            if (version) connectOpts.version = version;
+            const mcAuth = body.auth != null ? String(body.auth).trim().toLowerCase() : '';
+            if (mcAuth === 'offline' || mcAuth === 'microsoft') {
+              connectOpts.auth = mcAuth;
+            }
+            await this.onConnect(connectOpts);
           }
-          return this._sendJson(res, 200, { ok: true, port: portNum });
+          return this._sendJson(res, 200, { ok: true, host, port: portNum });
         } catch (err) {
           return this._sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
         }
@@ -452,6 +487,32 @@ export class DashboardServer {
             return this._sendJson(res, result.status, {
               ok: false,
               error: result.error ?? 'Smelt failed',
+              ...result,
+            });
+          }
+          this.broadcast();
+          return this._sendJson(res, 200, { ok: true, ...(result && typeof result === 'object' ? result : {}) });
+        } catch (err) {
+          return this._sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+        }
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/scratchpad') {
+        const auth = this._isAuthorizedPost(req, url);
+        if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
+        try {
+          const body = await this._readJsonBody(req);
+          const action = String(body.action ?? 'get').trim();
+          const goal = String(body.goal ?? '').trim().slice(0, 300);
+          const steps = Array.isArray(body.steps) ? body.steps.slice(0, 20).map(s => String(s ?? '').trim()).filter(Boolean) : [];
+          const note = body.note != null ? String(body.note).trim().slice(0, 500) : '';
+          const result = this.onScratchpad
+            ? await this.onScratchpad({ action, goal, steps, note })
+            : { ok: false, status: 503, error: 'Scratchpad chưa sẵn sàng' };
+          if (result?.ok === false && result?.status) {
+            return this._sendJson(res, result.status, {
+              ok: false,
+              error: result.error ?? 'Scratchpad action failed',
               ...result,
             });
           }

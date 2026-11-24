@@ -2,8 +2,44 @@ import pf from 'mineflayer-pathfinder';
 const { goals } = pf;
 import { Vec3 } from 'vec3';
 import { resolveCandidateNames } from './survival.js';
+import { rank, getEnchantmentBonus, getDurabilityRatio } from './equipment.js';
 
-const KEEP_SLOTS_TOOLS = ['_sword', '_axe', '_pickaxe', '_shovel', '_hoe', 'bow', 'crossbow', 'shield', 'water_bucket', 'totem_of_undying'];
+const KEEP_SLOTS_TOOLS = ['_sword', '_axe', '_pickaxe', '_shovel', '_hoe', 'bow', 'crossbow', 'shield', 'water_bucket', 'bucket', 'totem_of_undying'];
+const ARMOR_SLOTS = ['head', 'torso', 'legs', 'feet'];
+const ARMOR_SLOT_INDEX = { head: 5, torso: 6, legs: 7, feet: 8 };
+const ARMOR_SUFFIX_TO_SLOT = { _helmet: 'head', _chestplate: 'torso', _leggings: 'legs', _boots: 'feet' };
+const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest', 'barrel']);
+const BASE_UTILITY_NAMES = [
+  'white_bed', 'red_bed', 'blue_bed', 'black_bed', 'brown_bed', 'cyan_bed',
+  'gray_bed', 'green_bed', 'light_blue_bed', 'light_gray_bed', 'lime_bed',
+  'magenta_bed', 'orange_bed', 'pink_bed', 'purple_bed', 'yellow_bed',
+  'chest', 'trapped_chest', 'barrel', 'furnace', 'blast_furnace', 'smoker', 'crafting_table',
+];
+
+function gearScore(item) {
+  if (!item) return 0;
+  const dur = getDurabilityRatio(item);
+  const penalty = dur < 0.15 ? -1.5 : 0;
+  return rank(item) + penalty + dur * 0.25 + getEnchantmentBonus(item);
+}
+
+function armorSlotOf(name) {
+  const n = String(name ?? '').toLowerCase();
+  for (const [suffix, slot] of Object.entries(ARMOR_SUFFIX_TO_SLOT)) {
+    if (n.endsWith(suffix)) return slot;
+  }
+  return null;
+}
+
+function toolBucketOf(name) {
+  const n = String(name ?? '').toLowerCase();
+  if (n === 'water_bucket' || n === 'bucket') return 'water_or_bucket';
+  if (n === 'shield' || n === 'bow' || n === 'crossbow' || n === 'totem_of_undying') return n;
+  for (const suffix of ['_sword', '_axe', '_pickaxe', '_shovel', '_hoe']) {
+    if (n.endsWith(suffix)) return suffix;
+  }
+  return null;
+}
 const FOOD_NAMES = new Set([
   'apple', 'golden_apple', 'enchanted_golden_apple', 'bread', 'carrot', 'golden_carrot',
   'baked_potato', 'potato', 'cooked_beef', 'beef', 'cooked_porkchop', 'porkchop',
@@ -89,6 +125,7 @@ export class HomeManager {
       setAt: Date.now(),
     };
     this.memory?.set('home', home);
+    this.memory?.delete?.('homeAuto');
     this.memory?.upsertPoi?.({
       category: 'waypoint',
       label: 'home',
@@ -108,6 +145,7 @@ export class HomeManager {
 
   clear() {
     this.memory?.delete('home');
+    this.memory?.delete?.('homeAuto');
   }
 
   setStorageChest(position) {
@@ -118,8 +156,108 @@ export class HomeManager {
       z: Math.floor(position.z),
     };
     this.memory?.set('storageChest', chest);
+    this.memory?.delete?.('chestAuto');
     this.log(`📦 Đã lưu rương nhà tại ${chest.x}, ${chest.y}, ${chest.z}`);
     return chest;
+  }
+
+  autoSetFromBed(position, dimension = 'overworld') {
+    if (!position || this.config.setOnCommand === false) return null;
+    if (this.get() && !this.memory?.get('homeAuto')) return null;
+    const home = {
+      x: Math.round(position.x),
+      y: Math.round(position.y),
+      z: Math.round(position.z),
+      dimension: String(dimension ?? 'overworld'),
+      setAt: Date.now(),
+    };
+    this.memory?.set('home', home);
+    this.memory?.set('homeAuto', true);
+    this.memory?.upsertPoi?.({
+      category: 'waypoint',
+      label: 'home',
+      dimension: home.dimension,
+      x: home.x,
+      y: home.y,
+      z: home.z,
+      metadata: { isHome: true, autoDetected: true },
+    });
+    this.log(`🏠 Tự nhận diện giường làm điểm nhà (${home.x}, ${home.y}, ${home.z}).`);
+    return home;
+  }
+
+  detectNearbyBase({ radius = 12 } = {}) {
+    if (
+      this.config.setOnCommand === false ||
+      typeof this.bot?.findBlocks !== 'function' ||
+      !this.bot?.registry?.blocksByName
+    ) {
+      return null;
+    }
+
+    const blocksByName = this.bot.registry.blocksByName;
+    const idToKind = new Map();
+    for (const [name, info] of Object.entries(blocksByName)) {
+      if (!info?.id) continue;
+      if (name.endsWith('_bed')) idToKind.set(info.id, 'bed');
+      else if (CHEST_BLOCK_NAMES.has(name)) idToKind.set(info.id, 'chest');
+      else if (BASE_UTILITY_NAMES.includes(name)) idToKind.set(info.id, 'utility');
+    }
+    if (idToKind.size === 0) return null;
+
+    const positions = this.bot.findBlocks({
+      matching: [...idToKind.keys()],
+      maxDistance: radius,
+      count: 24,
+    }) ?? [];
+    if (positions.length < 3) return null;
+
+    let bedPos = null;
+    let chestPos = null;
+    for (const p of positions) {
+      const b = this.bot.blockAt?.(p);
+      const bName = b?.name?.toLowerCase?.() ?? '';
+      if (!bedPos && bName.endsWith('_bed')) bedPos = p;
+      if (!chestPos && CHEST_BLOCK_NAMES.has(bName)) chestPos = p;
+    }
+    if (!bedPos && !chestPos) return null;
+
+    if (!this.get()) {
+      const anchor = bedPos ?? chestPos;
+      const dim = String(this.bot.game?.dimension ?? 'overworld');
+      const home = {
+        x: Math.round(anchor.x),
+        y: Math.round(anchor.y),
+        z: Math.round(anchor.z),
+        dimension: dim,
+        setAt: Date.now(),
+      };
+      this.memory?.set('home', home);
+      this.memory?.set('homeAuto', true);
+      this.memory?.upsertPoi?.({
+        category: 'waypoint',
+        label: 'home',
+        dimension: dim,
+        x: home.x,
+        y: home.y,
+        z: home.z,
+        metadata: { isHome: true, autoDetected: true },
+      });
+      this.log(`🏠 Tự nhận diện căn cứ gần đây làm nhà tại ${home.x}, ${home.y}, ${home.z}.`);
+    }
+
+    if (!this.getStorageChest() && chestPos) {
+      const chest = {
+        x: Math.floor(chestPos.x),
+        y: Math.floor(chestPos.y),
+        z: Math.floor(chestPos.z),
+      };
+      this.memory?.set('storageChest', chest);
+      this.memory?.set('chestAuto', true);
+      this.log(`📦 Tự nhận diện rương căn cứ tại ${chest.x}, ${chest.y}, ${chest.z}.`);
+    }
+
+    return { home: this.get() ?? null, storageChest: this.getStorageChest() ?? null };
   }
 
   getStorageChest() {
@@ -302,8 +440,79 @@ export class HomeManager {
     const keepBlockStacks = Math.max(0, Number(this.inventoryConfig.blockStacks ?? 1));
     const plan = [];
 
+    // Decide which single primary piece per armor slot and per tool bucket stays in inventory,
+    // allowing at most 1 golden_helmet (Nether safety) and 1 unenchanted diamond+ blank when
+    // an enchanted lower-tier item is primary; duplicate/spare gear gets deposited to chest.
+    const keepGearItems = new Set();
+    const slots = this.bot.inventory?.slots ?? [];
+    const held = this.bot.heldItem ?? null;
+
+    for (const slot of ARMOR_SLOTS) {
+      const equipped = slots[ARMOR_SLOT_INDEX[slot]] ?? null;
+      const matches = items.filter((i) => armorSlotOf(i?.name) === slot);
+      const bestInv = [...matches].sort((a, b) => gearScore(b) - gearScore(a))[0];
+      const eqScore = equipped ? gearScore(equipped) : -Infinity;
+      const primary = bestInv && gearScore(bestInv) > eqScore + 0.01 ? bestInv : equipped;
+      if (bestInv && primary === bestInv) {
+        keepGearItems.add(bestInv);
+      }
+      if (primary && rank(primary) < 5) {
+        const blank = matches.find((i) => rank(i) >= 5 && getEnchantmentBonus(i) === 0);
+        if (blank) keepGearItems.add(blank);
+      }
+    }
+
+    const eqHead = slots[ARMOR_SLOT_INDEX.head] ?? null;
+    if (!eqHead || String(eqHead.name ?? '').toLowerCase() !== 'golden_helmet') {
+      const goldHelm = items
+        .filter((i) => String(i?.name ?? '').toLowerCase() === 'golden_helmet' && getDurabilityRatio(i) >= 0.2)
+        .sort((a, b) => gearScore(b) - gearScore(a))[0];
+      if (goldHelm) keepGearItems.add(goldHelm);
+    }
+
+    const toolGroups = new Map();
     for (const item of items) {
-      if (!item || isProtectedItem(item)) continue;
+      const bucket = toolBucketOf(item?.name);
+      if (!bucket) continue;
+      if (!toolGroups.has(bucket)) toolGroups.set(bucket, []);
+      toolGroups.get(bucket).push(item);
+    }
+    for (const [bucket, matches] of toolGroups.entries()) {
+      const sorted = [...matches].sort((a, b) => {
+        if (bucket === 'water_or_bucket') {
+          const aw = String(a?.name ?? '').toLowerCase() === 'water_bucket' ? 1 : 0;
+          const bw = String(b?.name ?? '').toLowerCase() === 'water_bucket' ? 1 : 0;
+          if (bw !== aw) return bw - aw;
+        }
+        return gearScore(b) - gearScore(a);
+      });
+      const heldSameBucket = held && toolBucketOf(held.name) === bucket ? held : null;
+      const bestInv = sorted[0];
+      const primary = heldSameBucket && gearScore(heldSameBucket) >= gearScore(bestInv)
+        ? heldSameBucket
+        : bestInv;
+      if (bestInv && primary === bestInv) {
+        keepGearItems.add(bestInv);
+      }
+      if (primary && rank(primary) < 5 && ['_sword', '_axe', '_pickaxe', '_shovel'].includes(bucket)) {
+        const blank = matches.find((i) => rank(i) >= 5 && getEnchantmentBonus(i) === 0);
+        if (blank) keepGearItems.add(blank);
+      }
+    }
+
+    for (const item of items) {
+      if (!item) continue;
+      const name = String(item.name ?? '').toLowerCase();
+      if (!name) continue;
+      if (isProtectedItem(item)) {
+        if (keepGearItems.has(item)) {
+          const cnt = item.count ?? 1;
+          if (cnt > 1) plan.push({ item, countToDeposit: cnt - 1 });
+          continue;
+        }
+        plan.push({ item, countToDeposit: item.count ?? 1 });
+        continue;
+      }
       let countToDeposit = item.count ?? 0;
       if (isFood(item) && foodKept < keepFoodLimit) {
         const keep = Math.min(countToDeposit, keepFoodLimit - foodKept);
@@ -326,6 +535,8 @@ export class HomeManager {
 
     let chestWindow = null;
     let openedHere = false;
+    let stored = 0;
+    const leftover = [];
 
     try {
       if (typeof chestTarget.deposit === 'function') {
@@ -349,26 +560,221 @@ export class HomeManager {
         openedHere = true;
       }
 
-      let stored = 0;
-      for (const { item, countToDeposit } of this._collectSurplusItems()) {
+      for (const entry of this._collectSurplusItems()) {
+        const { item, countToDeposit } = entry;
         try {
           await chestWindow.deposit(item.type, item.metadata ?? null, countToDeposit);
           stored += countToDeposit;
         } catch (err) {
           this.log(`Không thể cất ${item.name}: ${err.message}`);
+          leftover.push(entry);
         }
       }
 
       if (chestTarget.position) {
         this._indexChestWindow(chestTarget.position, chestWindow);
       }
-      this.log(`📦 Đã cất ${stored} vật phẩm vào rương nhà.`);
-      return stored > 0;
     } finally {
       if (openedHere && typeof chestWindow?.close === 'function') {
         try { chestWindow.close(); } catch {}
       }
     }
+
+    if (
+      leftover.length > 0 &&
+      openedHere &&
+      chestTarget.position &&
+      typeof this.bot.findBlock === 'function' &&
+      typeof this.bot.openChest === 'function'
+    ) {
+      const origin = chestTarget.position;
+      const altChest = this.bot.findBlock({
+        matching: (b) => {
+          if (!b?.position || !CHEST_BLOCK_NAMES.has(b.name)) return false;
+          return (
+            Math.floor(b.position.x) !== Math.floor(origin.x) ||
+            Math.floor(b.position.y) !== Math.floor(origin.y) ||
+            Math.floor(b.position.z) !== Math.floor(origin.z)
+          );
+        },
+        maxDistance: 6,
+      });
+      if (altChest) {
+        let altWin = null;
+        try {
+          if (this.bot.pathfinder?.goto && this.bot.entity?.position && altChest.position && this.bot.entity.position.distanceTo(altChest.position) > 4) {
+            await this.bot.pathfinder.goto(new goals.GoalGetToBlock(altChest.position.x, altChest.position.y, altChest.position.z));
+          }
+          altWin = await this.bot.openChest(altChest);
+          for (const { item, countToDeposit } of leftover) {
+            try {
+              await altWin.deposit(item.type, item.metadata ?? null, countToDeposit);
+              stored += countToDeposit;
+            } catch (err) {
+              this.log(`Rương phụ cũng không cất được ${item.name}: ${err.message}`);
+            }
+          }
+          if (altChest.position) this._indexChestWindow(altChest.position, altWin);
+        } catch (err) {
+          this.log(`Không mở được rương phụ: ${err.message}`);
+        } finally {
+          if (typeof altWin?.close === 'function') {
+            try { altWin.close(); } catch {}
+          }
+        }
+      }
+    }
+
+    this.log(`📦 Đã cất ${stored} vật phẩm vào rương nhà.`);
+    return stored > 0;
+  }
+
+  async restockEssentialsFromNearbyChest({ maxDistance = 16 } = {}) {
+    if (typeof this.bot?.openChest !== 'function') return { withdrawn: [] };
+
+    const items = this.bot.inventory?.items?.() ?? [];
+    const slots = this.bot.inventory?.slots ?? [];
+    const held = this.bot.heldItem ?? null;
+
+    const allOwned = [...items, ...(held ? [held] : [])];
+    const hasWeapon = allOwned.some((i) => {
+      const n = String(i?.name ?? '').toLowerCase();
+      return n.endsWith('_sword') || n.endsWith('_axe');
+    });
+    const hasPick = allOwned.some((i) => String(i?.name ?? '').toLowerCase().endsWith('_pickaxe'));
+    const missingArmorSlots = ARMOR_SLOTS.filter((slot) => {
+      const eq = slots[ARMOR_SLOT_INDEX[slot]];
+      if (eq) return false;
+      return !items.some((i) => armorSlotOf(i?.name) === slot);
+    });
+    const foodCount = items.reduce((sum, i) => sum + (isFood(i) ? (i.count ?? 1) : 0), 0);
+    const needsWeapon = !hasWeapon;
+    const needsPick = !hasPick;
+    const needsFood = foodCount < 8;
+
+    if (!needsWeapon && !needsPick && missingArmorSlots.length === 0 && !needsFood) {
+      return { withdrawn: [] };
+    }
+
+    let chestBlock = null;
+    const saved = this.getStorageChest();
+    if (saved && this.bot.entity?.position) {
+      const dist = Math.hypot(
+        this.bot.entity.position.x - saved.x,
+        this.bot.entity.position.y - saved.y,
+        this.bot.entity.position.z - saved.z
+      );
+      if (dist <= maxDistance) {
+        chestBlock = this.bot.blockAt?.(new Vec3(saved.x, saved.y, saved.z)) ?? null;
+        if (chestBlock && !CHEST_BLOCK_NAMES.has(chestBlock.name)) chestBlock = null;
+      }
+    }
+    if (!chestBlock && typeof this.bot.findBlock === 'function') {
+      chestBlock = this.bot.findBlock({
+        matching: (b) => b && CHEST_BLOCK_NAMES.has(b.name),
+        maxDistance: Math.min(8, maxDistance),
+      });
+    }
+    if (!chestBlock) return { withdrawn: [] };
+
+    if (
+      this.bot.pathfinder?.goto &&
+      this.bot.entity?.position &&
+      chestBlock.position &&
+      this.bot.entity.position.distanceTo(chestBlock.position) > 4
+    ) {
+      await this.bot.pathfinder.goto(new goals.GoalGetToBlock(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z));
+    }
+
+    const chestWindow = await this.bot.openChest(chestBlock);
+    const withdrawn = [];
+    let gotWeapon = hasWeapon;
+    let gotPick = hasPick;
+    const coveredArmor = new Set(ARMOR_SLOTS.filter((s) => !missingArmorSlots.includes(s)));
+    let remainingFood = needsFood ? Math.max(0, 16 - foodCount) : 0;
+
+    try {
+      const containerItems = readChestItems(chestWindow);
+      const tryTake = async (stack, qty) => {
+        const amt = Math.min(qty, stack.count ?? 1);
+        if (amt <= 0) return 0;
+        try {
+          await chestWindow.withdraw(stack.type, stack.metadata ?? null, amt);
+          withdrawn.push(`${amt} ${stack.name}`);
+          return amt;
+        } catch {
+          return 0;
+        }
+      };
+
+      if (needsWeapon) {
+        const bestWpn = containerItems
+          .filter((i) => {
+            const n = String(i?.name ?? '').toLowerCase();
+            return n.endsWith('_sword') || n.endsWith('_axe');
+          })
+          .sort((a, b) => gearScore(b) - gearScore(a))[0];
+        if (bestWpn && await tryTake(bestWpn, 1)) gotWeapon = true;
+      }
+
+      if (needsPick) {
+        const bestPick = containerItems
+          .filter((i) => String(i?.name ?? '').toLowerCase().endsWith('_pickaxe'))
+          .sort((a, b) => gearScore(b) - gearScore(a))[0];
+        if (bestPick && await tryTake(bestPick, 1)) gotPick = true;
+      }
+
+      for (const slot of missingArmorSlots) {
+        const piece = containerItems
+          .filter((i) => armorSlotOf(i?.name) === slot)
+          .sort((a, b) => gearScore(b) - gearScore(a))[0];
+        if (piece && await tryTake(piece, 1)) coveredArmor.add(slot);
+      }
+
+      if (remainingFood > 0) {
+        const foodOrder = ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'golden_carrot', 'bread', 'baked_potato', 'cooked_chicken', 'apple', 'carrot'];
+        const foods = containerItems
+          .filter((i) => isFood(i))
+          .sort((a, b) => {
+            const ia = foodOrder.indexOf(String(a.name).toLowerCase());
+            const ib = foodOrder.indexOf(String(b.name).toLowerCase());
+            return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+          });
+        for (const f of foods) {
+          if (remainingFood <= 0) break;
+          const took = await tryTake(f, remainingFood);
+          remainingFood -= took;
+        }
+      }
+
+      // If still missing weapon, pickaxe, or any armor slot, grab crafting materials so tickAutoUpgrade can forge replacements.
+      if (!gotWeapon || !gotPick || coveredArmor.size < ARMOR_SLOTS.length) {
+        const craftTargets = [
+          { match: (n) => n === 'diamond', max: 8 },
+          { match: (n) => n === 'iron_ingot', max: 16 },
+          { match: (n) => n === 'coal' || n === 'charcoal', max: 8 },
+          { match: (n) => n === 'stick' || n.endsWith('_planks'), max: 8 },
+        ];
+        for (const { match, max } of craftTargets) {
+          let need = max;
+          for (const stack of containerItems.filter((i) => match(String(i?.name ?? '').toLowerCase()))) {
+            if (need <= 0) break;
+            need -= await tryTake(stack, need);
+          }
+        }
+      }
+
+      if (chestBlock.position) this._indexChestWindow(chestBlock.position, chestWindow);
+    } finally {
+      if (typeof chestWindow?.close === 'function') {
+        try { chestWindow.close(); } catch {}
+      }
+    }
+
+    if (withdrawn.length > 0) {
+      this.log(`🎒 Đã tự lấy đồ dự phòng từ rương: ${withdrawn.join(', ')}`);
+    }
+    return { withdrawn };
   }
 
   async storeSurplusSorted({ openChestForPos = null } = {}) {

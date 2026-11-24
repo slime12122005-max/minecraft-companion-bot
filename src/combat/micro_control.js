@@ -10,6 +10,20 @@ export function isShield(name) { return name === 'shield'; }
 export function isBow(name) { return name === 'bow' || name.endsWith('_bow'); }
 export function isArrow(name) { return name === 'arrow' || name.endsWith('_arrow'); }
 
+export function isNearFarmland(bot) {
+  const pos = bot?.entity?.position;
+  if (!pos || typeof bot.blockAt !== 'function') return false;
+  for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    for (const dy of [0, -1]) {
+      const checkPos = typeof pos.offset === 'function'
+        ? pos.offset(dx, dy, dz)
+        : new Vec3(pos.x + dx, pos.y + dy, pos.z + dz);
+      if (itemName(bot.blockAt(checkPos)) === 'farmland') return true;
+    }
+  }
+  return false;
+}
+
 export function getAttackCooldownMs(item) {
   const name = itemName(item);
   let speed = 4.0;
@@ -52,12 +66,22 @@ export function isFriendlyInCursor(bot, target, owner = null) {
   return hit.type === 'player';
 }
 
+function resolveAimHeight(entity) {
+  const rawH = typeof entity?.height === 'number' && entity.height > 0 ? entity.height : 1.8;
+  return Math.max(0.35, Math.min(1.5, rawH * 0.75));
+}
+
 export async function face(ctx, entity) {
   if (!entity?.position) return;
   try {
-    const look = entity.position.offset(0, entity.height ?? 1.62, 0);
+    const look = entity.position.offset(0, resolveAimHeight(entity), 0);
     if (ctx.humanizer?.smoothLookAt) {
-      await ctx.humanizer.smoothLookAt(look, { steps: 3, jitterRad: 0.015 });
+      const cfgStepMs = ctx.humanizer.config?.lookStepMs ?? 22;
+      await ctx.humanizer.smoothLookAt(look, {
+        steps: 3,
+        stepMs: Math.min(8, cfgStepMs),
+        jitterRad: 0.008,
+      });
     } else if (typeof ctx.bot.lookAt === 'function') {
       await ctx.bot.lookAt(look, false);
     }
@@ -87,6 +111,28 @@ export function lowerShield(ctx) {
   } catch {}
 }
 
+async function ensureMeleeReady(ctx, {
+  target = null,
+  mobCount = ctx._currentMobCount ?? 1,
+  distance = ctx._currentTargetDist ?? 2,
+  opponentBlocking = false,
+} = {}) {
+  const prevHeldName = itemName(ctx.bot.heldItem);
+  try {
+    if (typeof ctx.equipment?.equipWeaponForSituation === 'function') {
+      await ctx.equipment.equipWeaponForSituation({ target, mobCount, distance, opponentBlocking });
+    } else if (ctx.equipment?.equipMelee) {
+      await ctx.equipment.equipMelee();
+    }
+  } catch {}
+  const nextHeldName = itemName(ctx.bot.heldItem);
+  if (ctx.bot._client && nextHeldName && nextHeldName !== prevHeldName) {
+    ctx.lastWeaponEquipAt = Date.now();
+    return true;
+  }
+  return false;
+}
+
 export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1, distance = ctx._currentTargetDist ?? 2, owner = null } = {}) {
   if (ctx.isEating?.()) return;
   const now = Date.now();
@@ -99,14 +145,13 @@ export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1
     itemName(target?.heldItem) === 'shield'
   );
   try {
-    if (typeof ctx.equipment?.equipWeaponForSituation === 'function') {
-      await ctx.equipment.equipWeaponForSituation({ target, mobCount, distance, opponentBlocking });
-    } else if (ctx.equipment?.equipMelee) {
-      await ctx.equipment.equipMelee();
-    }
+    await ensureMeleeReady(ctx, { target, mobCount, distance, opponentBlocking });
     if (isFriendlyInCursor(ctx.bot, target, owner)) return;
     const finalCooldownMs = getAttackCooldownMs(ctx.bot.heldItem);
     if (now - ctx.lastAttackAt < finalCooldownMs + jitterMs) return;
+    if (ctx.bot._client && now - (ctx.lastWeaponEquipAt ?? 0) < Math.min(450, finalCooldownMs * 0.7)) {
+      return;
+    }
     ctx.lastAttackAt = now;
     if (typeof ctx.bot.attack === 'function') {
       await ctx.bot.attack(target);
@@ -117,16 +162,33 @@ export async function attack(ctx, target, { mobCount = ctx._currentMobCount ?? 1
 
 export async function jumpCrit(ctx, target, opts = {}) {
   if (ctx.isEating?.()) return;
+  if (isNearFarmland(ctx.bot)) {
+    await ctx._attack(target, opts);
+    return;
+  }
   let jumped = false;
   try {
     if (typeof ctx.bot.setControlState === 'function') {
+      const holdMs = Math.min(60, Math.max(0, ctx.critJumpMs));
       jumped = true;
       ctx.bot.setControlState('jump', true);
-      await new Promise(r => setTimeout(r, ctx.critJumpMs));
+      if (holdMs > 0) await new Promise(r => setTimeout(r, holdMs));
       ctx.bot.setControlState('jump', false);
       jumped = false;
+
+      let remaining = Math.max(0, ctx.critJumpMs - holdMs);
+      while (remaining > 0 && ctx.running && !ctx.isEating?.() && !ctx._canCrit()) {
+        const step = Math.min(25, remaining);
+        await new Promise(r => setTimeout(r, step));
+        remaining -= step;
+      }
     }
     if (!ctx.running || ctx.isEating?.()) return;
+    if (ctx.bot._client && target?.position && typeof ctx.bot.lookAt === 'function') {
+      try {
+        await ctx.bot.lookAt(target.position.offset(0, resolveAimHeight(target), 0), true);
+      } catch {}
+    }
     await ctx._attack(target, opts);
   } catch {
   } finally {
@@ -163,10 +225,24 @@ export async function shootBow(ctx, target, bowArg = null) {
 }
 
 export async function moveClose(ctx, target) {
+  if (!ctx.isEating?.() && target?.position && ctx.bot.entity?.position) {
+    const dist = ctx.bot.entity.position.distanceTo(target.position);
+    if (dist <= 7) {
+      await ensureMeleeReady(ctx, {
+        target,
+        mobCount: ctx._currentMobCount ?? 1,
+        distance: dist,
+        opponentBlocking: false,
+      });
+    }
+  }
   if (ctx.bot.pathfinder && target?.position) {
     ctx.retreatGoal = null;
+    if (ctx._ownsPathfinder && ctx._followTargetId != null && target.id != null && ctx._followTargetId === target.id) {
+      return;
+    }
     try {
-      ctx._setCombatGoal(new goals.GoalNear(target.position.x, target.position.y, target.position.z, 3));
+      ctx._setCombatGoal(new goals.GoalFollow(target, 1.9), true, target.id ?? null);
     } catch {}
   }
 }
@@ -228,7 +304,10 @@ export async function fleeFrom(ctx, threat) {
 export async function retreat(ctx, owner, threat) {
   ctx.lastRetreatAt = Date.now();
   if (ctx.config.defendOwner && owner?.position && ctx.bot.entity?.position) {
-    if (ctx.bot.entity.position.distanceTo(owner.position) > 3) {
+    const distToOwner = ctx.bot.entity.position.distanceTo(owner.position);
+    const ownerSafer = !threat?.position ||
+      owner.position.distanceTo(threat.position) > ctx.bot.entity.position.distanceTo(threat.position) + 1.5;
+    if (distToOwner > 3 && ownerSafer) {
       await ctx._moveTo(owner, 2);
       return;
     }
@@ -322,58 +401,94 @@ export async function applyDecision(ctx, decision, threat, owner) {
   }
 
   if (action === 'attack' || action === 'melee' || action === 'bow') {
-    if (distance < 4.5) {
-      if (itemName(target).includes('creeper')) {
-        if (isCreeperIgnited(target)) {
-          await ctx._fleeFrom(target);
-          return;
-        }
-        if (
-          owner?.position &&
-          ctx.bot.entity?.position &&
-          wouldKnockCreeperTowardOwner(ctx.bot.entity.position, target.position, owner.position)
-        ) {
-          const dx = target.position.x - ctx.bot.entity.position.x;
-          const dz = target.position.z - ctx.bot.entity.position.z;
-          const len = Math.hypot(dx, dz) || 1;
-          const sideCandidates = [
-            target.position.offset((-dz / len) * 3, 0, (dx / len) * 3),
-            target.position.offset((dz / len) * 3, 0, (-dx / len) * 3),
-          ];
-          const safeSide = sideCandidates.find(
-            cand => !wouldKnockCreeperTowardOwner(cand, target.position, owner.position) && ctx._isSafeEscapeSpot(cand)
-          ) ?? sideCandidates[0];
-          if (ctx.bot.pathfinder && safeSide) {
-            try {
-              ctx._setCombatGoal(new goals.GoalNear(safeSide.x, safeSide.y, safeSide.z, 1));
-            } catch {}
-          }
-          return;
-        }
-      } else if (ctx.humanizer?.maybeCombatStrafe && ctx.bot.entity?.position) {
-        const bp = ctx.bot.entity.position;
-        const dx = target.position.x - bp.x;
-        const dz = target.position.z - bp.z;
-        const len = Math.hypot(dx, dz) || 1;
-        const rx = -dz / len;
-        const rz = dx / len;
-        const safeRight = typeof bp.offset === 'function'
-          ? ctx._isSafeEscapeSpot(bp.offset(rx * 1.8, 0, rz * 1.8))
-          : false;
-        const safeLeft = typeof bp.offset === 'function'
-          ? ctx._isSafeEscapeSpot(bp.offset(-rx * 1.8, 0, -rz * 1.8))
-          : false;
-        ctx.humanizer.maybeCombatStrafe({
-          distance,
-          inWater: Boolean(ctx.bot.entity?.isInWater),
-          isCreeper: false,
-          onGround: Boolean(ctx.bot.entity?.onGround),
-          safeLeft,
-          safeRight,
-        });
+    const isCreeper = itemName(target).includes('creeper');
+    if (distance < 4.5 && isCreeper) {
+      if (isCreeperIgnited(target)) {
+        await ctx._fleeFrom(target);
+        return;
       }
+      if (
+        owner?.position &&
+        ctx.bot.entity?.position &&
+        wouldKnockCreeperTowardOwner(ctx.bot.entity.position, target.position, owner.position)
+      ) {
+        const dx = target.position.x - ctx.bot.entity.position.x;
+        const dz = target.position.z - ctx.bot.entity.position.z;
+        const len = Math.hypot(dx, dz) || 1;
+        const sideCandidates = [
+          target.position.offset((-dz / len) * 3, 0, (dx / len) * 3),
+          target.position.offset((dz / len) * 3, 0, (-dx / len) * 3),
+        ];
+        const safeSide = sideCandidates.find(
+          cand => !wouldKnockCreeperTowardOwner(cand, target.position, owner.position) && ctx._isSafeEscapeSpot(cand)
+        ) ?? sideCandidates[0];
+        if (ctx.bot.pathfinder && safeSide) {
+          try {
+            ctx._setCombatGoal(new goals.GoalNear(safeSide.x, safeSide.y, safeSide.z, 1));
+          } catch {}
+        }
+        return;
+      }
+    }
+
+    const holdPos = ctx.shelterHoldPos ?? null;
+    const isRangedEnemy = RANGED_MOBS.some(r => itemName(target).includes(r));
+    if (holdPos) {
       ctx._lowerShield();
-      const allowCrit = ctx.config.crit && !ctx.bot.entity?.isInWater;
+      if (ctx.bot.entity?.position && ctx.bot.pathfinder) {
+        const holdDist = ctx.bot.entity.position.distanceTo(holdPos);
+        if (holdDist > 0.75) {
+          try {
+            ctx._setCombatGoal(new goals.GoalNear(holdPos.x, holdPos.y, holdPos.z, 0.4));
+          } catch {}
+        } else if (ctx._ownsPathfinder && holdDist <= 0.65) {
+          ctx._releaseCombatGoal();
+        }
+      }
+    } else if (distance > 2.65) {
+      if (distance >= 4.5 && isRangedEnemy && ctx._hasShield()) {
+        ctx.creeperShieldUntil = Date.now() + 1200;
+        await ctx._raiseShield();
+      } else {
+        ctx._lowerShield();
+      }
+      await ctx._moveClose(target);
+    } else {
+      ctx._lowerShield();
+      if (ctx._followTargetId != null && distance <= 2.2) {
+        ctx._releaseCombatGoal();
+      }
+    }
+
+    if (!holdPos && !isCreeper && (distance <= 3.0 || (isRangedEnemy && distance <= 14.0)) && ctx.humanizer?.maybeCombatStrafe && ctx.bot.entity?.position) {
+      const bp = ctx.bot.entity.position;
+      const dx = target.position.x - bp.x;
+      const dz = target.position.z - bp.z;
+      const len = Math.hypot(dx, dz) || 1;
+      const rx = -dz / len;
+      const rz = dx / len;
+      const safeRight = typeof bp.offset === 'function'
+        ? ctx._isSafeEscapeSpot(bp.offset(rx * 1.8, 0, rz * 1.8))
+        : false;
+      const safeLeft = typeof bp.offset === 'function'
+        ? ctx._isSafeEscapeSpot(bp.offset(-rx * 1.8, 0, -rz * 1.8))
+        : false;
+      ctx.humanizer.maybeCombatStrafe({
+        distance: Math.min(distance, 2.8),
+        inWater: Boolean(ctx.bot.entity?.isInWater),
+        isCreeper: false,
+        onGround: Boolean(ctx.bot.entity?.onGround),
+        safeLeft,
+        safeRight,
+      });
+    }
+
+    const maxSwingDist = ctx.config.attackRange ?? (ctx.bot._client ? 3.25 : 4.5);
+    const effectiveSwingDist = holdPos ? Math.max(maxSwingDist, 3.4) : maxSwingDist;
+    if (distance <= effectiveSwingDist) {
+      ctx._lowerShield();
+      const preferGroundedSweep = (ctx._currentMobCount ?? 1) >= 2 && itemName(ctx.bot.heldItem).endsWith('_sword');
+      const allowCrit = !holdPos && ctx.config.crit && !ctx.bot.entity?.isInWater && !isNearFarmland(ctx.bot) && !preferGroundedSweep && distance <= 3.15;
       const cooldownMs = getAttackCooldownMs(ctx.bot.heldItem);
       if (allowCrit) {
         if (ctx._canCrit()) await ctx._attack(target, { owner });
@@ -381,15 +496,6 @@ export async function applyDecision(ctx, decision, threat, owner) {
       } else {
         await ctx._attack(target, { owner });
       }
-    } else if (distance <= ctx.config.radius) {
-      const isRangedEnemy = RANGED_MOBS.some(r => itemName(target).includes(r));
-      if (isRangedEnemy && ctx._hasShield()) {
-        ctx.creeperShieldUntil = Date.now() + 1200;
-        await ctx._raiseShield();
-      } else {
-        ctx._lowerShield();
-      }
-      await ctx._moveClose(target);
     }
     return;
   }

@@ -89,6 +89,13 @@ export async function performUnstuckStep(ctx, {
     ctx._isOnFire?.() ||
     (typeof ctx.bot.oxygenLevel === 'number' && ctx.bot.oxygenLevel <= 10)
   );
+  const pos = ctx.bot?.entity?.position;
+  let onFarmland = false;
+  if (pos && typeof ctx.bot?.blockAt === 'function') {
+    const feet = ctx.bot.blockAt(pos);
+    const below = ctx.bot.blockAt(typeof pos.offset === 'function' ? pos.offset(0, -1, 0) : { x: pos.x, y: pos.y - 1, z: pos.z });
+    onFarmland = feet?.name === 'farmland' || below?.name === 'farmland';
+  }
   ctx._unstuckDir = ctx._unstuckDir === 1 ? -1 : 1;
   const strafeKey = ctx._unstuckDir === 1 ? 'right' : 'left';
   if (!ctx._unstuckTimers) ctx._unstuckTimers = new Set();
@@ -106,7 +113,7 @@ export async function performUnstuckStep(ctx, {
   };
 
   if (stage <= 1) {
-    pulseControl('jump', jumpMs);
+    if (!onFarmland) pulseControl('jump', jumpMs);
     if (!unsafeLateral) {
       pulseControl(strafeKey, strafeMs);
     }
@@ -125,7 +132,7 @@ export async function performUnstuckStep(ctx, {
       try { ctx.bot.pathfinder?.setGoal?.(null); } catch {}
     }
     try {
-      pulseControl('jump', jumpMs);
+      if (!onFarmland) pulseControl('jump', jumpMs);
       if (!unsafeLateral) {
         pulseControl('back', backMs);
         pulseControl(strafeKey, strafeMs);

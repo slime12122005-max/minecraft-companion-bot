@@ -43,7 +43,7 @@ function hasInfinityEnchant(bow) {
 }
 
 export class CombatController {
-  constructor(bot, config = {}, { jev, equipment, humanizer = null, log = () => {}, onBusyChange = null, isEating = null, bowChargeMs = 950, critJumpMs = 260 } = {}) {
+  constructor(bot, config = {}, { jev, equipment, humanizer = null, log = () => {}, onBusyChange = null, isEating = null, bowChargeMs = 950, critJumpMs = 330 } = {}) {
     this.bot = bot;
     this.config = {
       enabled: true,
@@ -71,6 +71,7 @@ export class CombatController {
     this.running = false;
     this.busy = false;
     this._ownsPathfinder = false;
+    this._followTargetId = null;
     this._tick = null;
     this._jev = null;
     this.targetId = null;
@@ -82,6 +83,7 @@ export class CombatController {
     this._currentMobCount = 1;
     this._currentTargetDist = 2;
     this.lastAttackAt = 0;
+    this.lastWeaponEquipAt = 0;
     this.creeperShieldUntil = 0;
     this.shieldActive = false;
     this.bowCharging = false;
@@ -91,6 +93,7 @@ export class CombatController {
     this.pendingWaterPickupAt = 0;
     this.lastOwnerHealth = null;
     this.ownerHurtUntil = 0;
+    this.shelterHoldPos = null;
   }
 
   _setBusy(nextBusy) {
@@ -99,13 +102,16 @@ export class CombatController {
     try { this.onBusyChange?.({ busy: nextBusy }); } catch {}
   }
 
-  _setCombatGoal(goal) {
+  _setCombatGoal(goal, dynamic = false, followTargetId = null) {
     if (!this.bot.pathfinder) return;
     this._ownsPathfinder = true;
-    this.bot.pathfinder.setGoal(goal);
+    this._followTargetId = followTargetId;
+    if (dynamic) this.bot.pathfinder.setGoal(goal, true);
+    else this.bot.pathfinder.setGoal(goal);
   }
 
   _releaseCombatGoal() {
+    this._followTargetId = null;
     if (!this._ownsPathfinder) return;
     this._ownsPathfinder = false;
     if (this.bot.pathfinder) this.bot.pathfinder.setGoal(null);
@@ -126,6 +132,7 @@ export class CombatController {
     this.retreatGoal = null;
     this.lastRetreatAt = 0;
     this.pendingWaterPickupAt = 0;
+    this.shelterHoldPos = null;
     this._lowerShield();
     if (this.bowCharging) {
       this.bowCharging = false;
@@ -223,10 +230,23 @@ export class CombatController {
       return;
     }
 
+    const armorMitigation = Math.max(0, Number(this.equipment?.armorMitigation?.() ?? 0));
+    this.lastArmorMitigation = armorMitigation;
+    const effectiveHealth = health / (1 - Math.min(0.82, armorMitigation));
     const closeCount = nearby.filter(m => m.distance <= 5).length;
     const isWarden = threat.name.toLowerCase().includes('warden');
-    const swarmed = closeCount >= 3 && health <= 12;
-    if (health <= this.config.retreatHealth || isWarden || swarmed) {
+    const hasShelterBombThreat = nearby.some(m => {
+      const n = m.name.toLowerCase();
+      return n.includes('warden') || (n.includes('creeper') && m.distance < 5.5);
+    });
+    const holdingEndermanShelter = Boolean(this.shelterHoldPos) &&
+      threat.name.toLowerCase().includes('enderman') &&
+      !hasShelterBombThreat;
+
+    const maxSwarmCount = armorMitigation >= 0.68 ? 8 : armorMitigation >= 0.5 ? 6 : 3;
+    const swarmEffectiveHealthLimit = armorMitigation >= 0.5 ? 28 : 12;
+    const swarmed = closeCount >= maxSwarmCount && effectiveHealth <= swarmEffectiveHealthLimit;
+    if (!holdingEndermanShelter && (health <= this.config.retreatHealth || isWarden || swarmed)) {
       this._setBusy(true);
       if (this._hasShield() && (swarmed || isWarden)) await this._raiseShield();
       await this._retreat(owner, threat.entity);
@@ -237,9 +257,12 @@ export class CombatController {
 
     const jevInterval = this.config.jevIntervalMs ?? 4000;
     const hasFreshDecision = this.lastDecision && (now - this.lastDecisionAt <= Math.max(3000, jevInterval * 2));
-    const decision = hasFreshDecision
+    let decision = hasFreshDecision
       ? this._resolveJevDecision(this.lastDecision, nearby, threat, owner, health)
       : this._localReflexDecision(threat, nearby, health, threatAssessment);
+    if (holdingEndermanShelter) {
+      decision = { action: 'melee', targetId: threat.id };
+    }
 
     if (decision.action !== 'idle') this._setBusy(true);
     await this._applyDecision(decision, threat, owner);
@@ -314,6 +337,16 @@ export class CombatController {
   }
 
   _localReflexDecision(threat, nearby = [], health = 20, assessment = null) {
+    const threatName = threat.name.toLowerCase();
+    if (threatName.includes('enderman')) {
+      return { action: 'melee', targetId: threat.id };
+    }
+    if (threatName.includes('witch') && threat.distance <= 12) {
+      return { action: 'melee', targetId: threat.id };
+    }
+    if (threatName.includes('creeper') && this._canUseBow() && threat.distance >= 4.5 && threat.distance < 22) {
+      return { action: 'bow', targetId: threat.id };
+    }
     if (
       this.config.useThreatScore !== false &&
       assessment?.posture === 'retreat' &&

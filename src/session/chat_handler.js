@@ -1,5 +1,43 @@
 import { summarizeReadiness } from '../readiness.js';
 import { formatError } from './task_helpers.js';
+import { cleanTargetPhrase, normalizeText, parseQuantityAnswer } from '../commands.js';
+
+function applyQuantityAnswer(parsed, count) {
+  if (!parsed) return parsed;
+  if (parsed.type === 'chain') {
+    const steps = (parsed.steps ?? []).map((step) => {
+      if (!step) return step;
+      if (step.needsCount) {
+        const concreteCount = count === 'all' && step.type !== 'give' ? 64 : count;
+        const { needsCount: _drop, ...rest } = step;
+        return { ...rest, count: concreteCount };
+      }
+      if (step.type === 'give' && count !== 'all') {
+        return { ...step, minDeliverCount: count };
+      }
+      return step;
+    });
+    const { needsCount: _dropChain, ...restChain } = parsed;
+    return { ...restChain, steps };
+  }
+  const { needsCount: _drop, ...rest } = parsed;
+  const concreteCount = count === 'all' && parsed.type !== 'give' ? 64 : count;
+  if (parsed.type === 'give') {
+    return {
+      ...rest,
+      count: concreteCount,
+      ...(typeof concreteCount === 'number' ? { minDeliverCount: concreteCount } : {}),
+    };
+  }
+  if (parsed.type === 'gather') {
+    return {
+      ...rest,
+      count: concreteCount,
+      autoDeliver: parsed.autoDeliver ?? true,
+    };
+  }
+  return { ...rest, count: concreteCount };
+}
 
 export function createChatHandler(ctx) {
   const {
@@ -107,21 +145,76 @@ export function createChatHandler(ctx) {
       const last = nonOwnerRepliedAt.get(username) ?? 0;
       if (viaWhisper || now - last > 60000) {
         nonOwnerRepliedAt.set(username, now);
-        reply(`Xin chào ${username}, tôi chỉ nghe lệnh của ${config.owner}.`);
+        const guestType = router.parse?.(message)?.type ?? 'unknown';
+        const nonOwnerMsg = ctx.companion?.buildNonOwnerReply?.(username, message, guestType)
+          ?? `Xin chào ${username}, tôi chỉ nghe lệnh của ${config.owner}.`;
+        reply(nonOwnerMsg);
       }
       return;
+    }
+
+    if (state.pendingQuantity && Date.now() > state.pendingQuantity.expiresAt) {
+      state.pendingQuantity = null;
     }
 
     const routed = router.route
       ? router.route(message)
       : { command: router.parseChain ? router.parseChain(message) : router.parse(message), confidence: 1, tier: 'exact' };
-    const parsed = routed?.command;
+    let parsed = routed?.command;
     if (!parsed) return;
     if (routed?.tier === 'fuzzy') {
       logFor('router')(`fuzzy "${message}" -> ${parsed.type} (${Math.round((routed.confidence ?? 0) * 100)}%)`);
     }
     logFor(viaWhisper ? 'whisper' : 'chat')(`${username}: ${message}`);
     state.chatGen += 1;
+
+    if (state.pendingQuantity) {
+      const quickNorm = normalizeText(message).replace(/[?!.,~]+$/g, '').trim();
+      if (['huy', 'thoi', 'khoi', 'thoi khoi', 'bo', 'cancel'].includes(quickNorm)) {
+        state.pendingQuantity = null;
+        if (inboxEntry) {
+          inboxEntry.parsedType = 'cancel';
+          inboxEntry.handledByBot = true;
+        }
+        pushChatHistory('user', message);
+        reply('Đã hủy yêu cầu.');
+        return;
+      }
+      if (parsed.type === 'unknown') {
+        const qtyAns = parseQuantityAnswer(message);
+        if (qtyAns) {
+          const pending = state.pendingQuantity;
+          state.pendingQuantity = null;
+          if (inboxEntry) {
+            inboxEntry.parsedType = 'quantity_reply';
+            inboxEntry.handledByBot = true;
+          }
+          pushChatHistory('user', message);
+          const resolvedParsed = applyQuantityAnswer(pending.parsed, qtyAns.count);
+          await ctx.dispatchParsedCommand(resolvedParsed, username, reply, null, {
+            ...(pending.chatCtx ?? {}),
+            userMessage: message,
+            fromApi,
+          });
+          return;
+        }
+      } else if (!parsed.needsCount && parsed.type !== 'cancel') {
+        const pending = state.pendingQuantity;
+        state.pendingQuantity = null;
+        const hadPendingDeliver = Boolean(
+          pending.parsed?.autoDeliver ||
+          (pending.parsed?.type === 'chain' && pending.parsed.steps?.some(s => s?.type === 'give'))
+        );
+        const pendingTarget = pending.parsed?.target ?? pending.parsed?.steps?.find(s => s?.target)?.target;
+        if (
+          parsed.type === 'gather' &&
+          hadPendingDeliver &&
+          cleanTargetPhrase(normalizeText(parsed.target)) === cleanTargetPhrase(normalizeText(pendingTarget))
+        ) {
+          parsed = { ...parsed, autoDeliver: true };
+        }
+      }
+    }
 
     const isDirectCommand = parsed.type !== 'unknown' && parsed.type !== 'greet' && parsed.type !== 'ack';
     if (inboxEntry) {
@@ -144,6 +237,15 @@ export function createChatHandler(ctx) {
         }
       }
       logFor('antigravity')(`Chuyển "${message}" (${parsed.type}) sang Antigravity MCP.`);
+      ctx.companion?.scheduleChatFallback?.({
+        username,
+        message,
+        parsed,
+        reply,
+        inboxEntry,
+        myChatGen: state.chatGen,
+        receivedAt: Date.now(),
+      });
       return;
     }
 
@@ -158,7 +260,7 @@ export function createChatHandler(ctx) {
 
   return {
     pushChatHistory,
-    canHumanChat: () => false,
+    canHumanChat: () => Boolean(ctx.companion?.enabledChat),
     replyHuman,
     getBotStateSnapshot,
     handleCommand,

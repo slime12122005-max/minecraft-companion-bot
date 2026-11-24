@@ -134,13 +134,29 @@ function drawRadar(position, pois) {
   }
 }
 
+let lastAutoLanPort = '';
+let lanPortUserEdited = false;
+
+function isRemoteHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  return Boolean(h) && h !== 'localhost' && h !== '127.0.0.1' && h !== '::1';
+}
+
+function formatEndpointText(lan) {
+  if (!lan) return '';
+  if (lan.host && isRemoteHost(lan.host)) {
+    return lan.port && lan.port !== 25565 ? `${lan.host}:${lan.port}` : lan.host;
+  }
+  return lan.port ? `port ${lan.port}` : '';
+}
+
 function renderState(s) {
   const connEl = document.getElementById('connStatus');
-  const portText = s.lan && s.lan.port ? 'port ' + s.lan.port : '';
+  const endpointText = formatEndpointText(s.lan);
   if (connEl) {
     connEl.textContent = s.connected
-      ? '🟢 Đã vào thế giới (' + portText + ')'
-      : '🟡 Đang chờ vào LAN (' + portText + ')';
+      ? '🟢 Đã vào thế giới (' + endpointText + ')'
+      : '🟡 Đang chờ kết nối (' + endpointText + ')';
   }
 
   if (s.lan) {
@@ -148,7 +164,10 @@ function renderState(s) {
     const pEl = document.getElementById('lanPort');
     const oEl = document.getElementById('lanOwner');
     if (hEl && document.activeElement !== hEl && !hEl.value && s.lan.host) hEl.value = s.lan.host;
-    if (pEl && document.activeElement !== pEl && !pEl.value && s.lan.port) pEl.value = s.lan.port;
+    if (pEl && document.activeElement !== pEl && !pEl.value && s.lan.port) {
+      pEl.value = s.lan.port;
+      lastAutoLanPort = String(s.lan.port);
+    }
     if (oEl && document.activeElement !== oEl && !oEl.value && s.lan.owner) oEl.value = s.lan.owner;
   }
 
@@ -316,22 +335,92 @@ async function sendControl(action, label) {
   }
 }
 
+function parseDashboardConnectTarget(rawHostInput, rawPortInput) {
+  let host = String(rawHostInput || '').trim() || 'localhost';
+  const bracketChatMatch =
+    host.match(/hosted on domain\s*\[([^\]]+)\]/i) ||
+    host.match(/(?:tên miền|ten mien)\s*\[([^\]]+)\]/i);
+  if (bracketChatMatch) {
+    host = bracketChatMatch[1].trim();
+  } else {
+    const portChatMatch =
+      host.match(/hosted on port\s*\[?(\d{1,5})\]?/i) ||
+      host.match(/(?:tại cổng|tai cong)\s*\[?(\d{1,5})\]?/i);
+    if (portChatMatch) {
+      host = 'localhost';
+      if (!rawPortInput) rawPortInput = portChatMatch[1].trim();
+    }
+  }
+  host = host.replace(/^(?:tcp|minecraft):\/\//i, '').replace(/\/+$/, '').trim();
+  if (/^\[[^\]]+\]$/.test(host) && host.indexOf(':') === -1) {
+    host = host.slice(1, -1).trim();
+  }
+
+  let inlinePort = null;
+  const hostPortMatch = host.match(/^([^:\[\]]+):(\d{1,5})$/);
+  if (hostPortMatch) {
+    host = hostPortMatch[1].trim();
+    inlinePort = Number(hostPortMatch[2]);
+  }
+
+  const isE4mc = /(?:^|\.)e4mc\.link$/i.test(host);
+  const rawPortStr = String(rawPortInput || '').trim();
+  let port;
+  if (inlinePort != null) {
+    port = inlinePort;
+  } else if (!rawPortStr) {
+    port = 25565;
+  } else if (isE4mc && !lanPortUserEdited && rawPortStr === lastAutoLanPort && rawPortStr !== '25565') {
+    port = 25565;
+  } else {
+    port = Number(rawPortStr);
+  }
+  return { host, port, isE4mc };
+}
+
+const lanHostInput = document.getElementById('lanHost');
+const lanPortInput = document.getElementById('lanPort');
+if (lanPortInput) {
+  lanPortInput.addEventListener('input', () => {
+    lanPortUserEdited = true;
+  });
+}
+if (lanHostInput && lanPortInput) {
+  lanHostInput.addEventListener('input', () => {
+    const val = lanHostInput.value.trim();
+    const e4mcMatch = val.match(/(?:.*\[)?([a-zA-Z0-9._-]+\.e4mc\.link)(?:\])?(?::(\d{1,5}))?$/i);
+    if (e4mcMatch) {
+      if (e4mcMatch[2]) {
+        lanPortInput.value = e4mcMatch[2];
+        lanPortUserEdited = false;
+      } else if (!lanPortUserEdited) {
+        lanPortInput.value = '25565';
+      }
+    }
+  });
+}
+
 document.getElementById('lanForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const host = document.getElementById('lanHost').value.trim() || 'localhost';
-  const port = Number(document.getElementById('lanPort').value.trim());
+  const hEl = document.getElementById('lanHost');
+  const pEl = document.getElementById('lanPort');
+  const { host, port } = parseDashboardConnectTarget(hEl.value, pEl.value);
   const owner = document.getElementById('lanOwner').value.trim();
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     setActionStatus('Cổng LAN không hợp lệ (1-65535)');
     return;
   }
+  hEl.value = host;
+  pEl.value = String(port);
+  lastAutoLanPort = String(port);
+  lanPortUserEdited = false;
   const res = await fetch('/api/connect', {
     method: 'POST',
     headers: apiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ host, port, owner }),
   });
   const data = await res.json().catch(() => ({}));
-  setActionStatus(res.ok ? `Đang kết nối LAN cổng ${port}...` : (data.error || 'Không thể kết nối'));
+  setActionStatus(res.ok ? `Đang kết nối ${host}:${port}...` : (data.error || 'Không thể kết nối'));
   setTimeout(refresh, 300);
 });
 

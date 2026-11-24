@@ -74,7 +74,9 @@ export function evaluateThreatScore(nearbyMobs = [], { health = 20, armorMitigat
     totalThreatPower += D * M;
   }
 
-  const T = totalThreatPower / (H * (1 + A));
+  const armorFactor = 1 - Math.min(0.82, A);
+  const effectiveHealth = H / armorFactor;
+  const T = totalThreatPower / effectiveHealth;
   let posture = 'aggressive';
   if (T >= 1.2) posture = 'retreat';
   else if (T >= 0.6) posture = 'kite';
@@ -149,7 +151,8 @@ export function pickThreat(bot, mobs, state, owner = null, ownerHurtRecently = f
     if (name.includes('creeper')) score += 900;
     if (name.includes('evoker') || name.includes('piglin_brute')) score += 780;
     if (name.includes('skeleton') || name.includes('bogged') || name.includes('stray') || name.includes('pillager')) score += 700;
-    if (name.includes('witch') || name.includes('breeze')) score += 650;
+    if (name.includes('witch')) score += 760;
+    if (name.includes('breeze')) score += 650;
     if (name.includes('ravager') || name.includes('vindicator') || name.includes('wither_skeleton')) score += 620;
     if (name.includes('blaze') || name.includes('ghast') || name.includes('guardian')) score += 550;
     if (name.includes('zombie') || name.includes('husk') || name.includes('drowned')) score += 400;
@@ -195,10 +198,27 @@ export function resolveFocusTarget(focus, nearby, owner) {
 
 export function resolveJevDecision(ctx, raw, nearby, threat, owner, health) {
   if (!raw || typeof raw !== 'object') return ctx._localReflexDecision(threat, nearby, health, ctx.lastThreatAssessment);
-  if (typeof raw.urgentRetreat === 'number' && raw.urgentRetreat >= 0.75) {
+  const armorMitigation = Math.max(
+    0,
+    Number(ctx.equipment?.armorMitigation?.() ?? ctx.lastArmorMitigation ?? ctx.armorMitigation ?? 0)
+  );
+  const retreatHealth = ctx.config.retreatHealth ?? 8;
+  const hasLethalSpecial = nearby.some((m) => {
+    const n = m.name.toLowerCase();
+    return n.includes('warden') || (n.includes('creeper') && m.distance <= 6);
+  });
+  const closeMobs = nearby.filter((m) => m.distance <= 5).length;
+  const maxSafeCloseMobs = armorMitigation >= 0.68 ? 8 : armorMitigation >= 0.5 ? 6 : 3;
+  const heavilyArmoredSafe =
+    armorMitigation >= 0.5 &&
+    health > retreatHealth + 4 &&
+    !hasLethalSpecial &&
+    closeMobs <= maxSafeCloseMobs;
+
+  if (typeof raw.urgentRetreat === 'number' && raw.urgentRetreat >= 0.75 && !heavilyArmoredSafe) {
     return { action: 'retreat', targetId: threat.id };
   }
-  if (typeof raw.danger === 'number' && raw.danger >= 2.6 && health <= 12) {
+  if (typeof raw.danger === 'number' && raw.danger >= 2.6 && health <= 12 && !heavilyArmoredSafe) {
     return { action: 'retreat', targetId: threat.id };
   }
   const minConf = ctx.config.minConfidence ?? 0.3;
@@ -206,7 +226,6 @@ export function resolveJevDecision(ctx, raw, nearby, threat, owner, health) {
     return ctx._localReflexDecision(threat, nearby, health, ctx.lastThreatAssessment);
   }
   const action = raw.action ?? 'melee';
-  const retreatHealth = ctx.config.retreatHealth ?? 8;
   if (
     (action === 'retreat' || action === 'flee') &&
     health > retreatHealth + 4 &&
@@ -222,9 +241,30 @@ export function resolveJevDecision(ctx, raw, nearby, threat, owner, health) {
   ) {
     return { action: 'idle', targetId: threat.id };
   }
+  let resolvedAction = action;
+  if (
+    (resolvedAction === 'retreat' || resolvedAction === 'flee') &&
+    health > retreatHealth + 4
+  ) {
+    const overwhelmed =
+      closeMobs > maxSafeCloseMobs ||
+      (ctx.lastThreatAssessment?.score ?? 0) >= 1.2 ||
+      (!heavilyArmoredSafe && typeof raw.danger === 'number' && raw.danger >= 2.5);
+    if (!hasLethalSpecial && !overwhelmed) {
+      resolvedAction = (ctx._canUseBow?.() && threat.distance > 6 && threat.distance < 20)
+        ? 'bow'
+        : 'melee';
+    }
+  }
   let targetId = raw.targetId ?? null;
   if (targetId == null && raw.focus) {
     targetId = resolveFocusTarget(raw.focus, nearby, owner) ?? threat.id;
   }
-  return { action, targetId: targetId ?? threat.id };
+  if (threat?.name?.toLowerCase().includes('witch') && threat.distance <= 12 && resolvedAction === 'bow') {
+    resolvedAction = 'melee';
+  }
+  if (threat?.name?.toLowerCase().includes('enderman') && resolvedAction === 'bow') {
+    resolvedAction = 'melee';
+  }
+  return { action: resolvedAction, targetId: targetId ?? threat.id };
 }

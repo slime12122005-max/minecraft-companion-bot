@@ -228,37 +228,69 @@ export function createTaskHelpers(ctx) {
 
   function startDeathRecoveryTask(death, replyFn) {
     if (!death) return false;
-    if (death.unrecoverable) {
-      replyFn(`Vị trí chết ở ${death.unrecoverableReason || 'vùng nguy hiểm'} không thể tự nhặt an toàn.`);
+    const itemDespawnMs = config?.survival?.itemDespawnMs ?? 300000;
+    const check = survival.evaluateDeathRecovery(death, {
+      fromPos: bot.entity?.position ?? null,
+      currentDimension: bot.game?.dimension ?? null,
+      maxAgeMs: itemDespawnMs,
+    });
+    if (!check.ok) {
+      if (check.shouldClear) {
+        survival.clearDeath();
+        memory.flush().catch(() => {});
+      }
+      if (check.reason === 'too_far') {
+        replyFn(`Chỗ chết quá xa (${Math.round(check.distance)} block) — chạy tới nơi đồ cũng tự biến mất theo cơ chế 5 phút của game nên mình bỏ qua không đi nhặt nữa.`);
+      } else if (check.reason === 'will_despawn_on_way') {
+        replyFn(`Chỗ chết cách ${Math.round(check.distance)} block nhưng chỉ còn ~${Math.max(1, Math.ceil(check.remainingMs / 1000))}s là hết 5 phút đồ tự biến mất, chạy không kịp nên mình bỏ qua không đi lấy nữa.`);
+      } else if (check.reason === 'despawned_time') {
+        replyFn('Đồ rơi ở chỗ chết đã quá 5 phút và tự biến mất theo cơ chế game nên mình không quay lại lấy nữa.');
+      } else if (check.reason === 'wrong_dimension') {
+        replyFn(`Vị trí chết ở chiều không gian khác (${death.dimension}) nên mình chưa tự chạy qua lấy được.`);
+      } else {
+        replyFn(`Vị trí chết ở ${death.unrecoverableReason || 'vùng nguy hiểm'} làm mất đồ rồi nên mình không quay lại nhặt nữa.`);
+      }
       return false;
     }
-    if (bot.entity?.position) {
-      const dist = Math.hypot(
-        bot.entity.position.x - death.x,
-        bot.entity.position.y - death.y,
-        bot.entity.position.z - death.z
-      );
-      if (dist > 600) {
-        replyFn(`Điểm chết quá xa (${Math.round(dist)}m), chờ lệnh của chủ nhân.`);
-        return false;
-      }
-    }
+
     stopCurrentTask('Đi nhặt lại đồ sau khi chết');
     replyFn(`Tôi đang chạy tới chỗ chết (${death.x}, ${death.y}, ${death.z}) để nhặt lại đồ.`);
+    let abortedForDespawn = false;
     const run = tasks.run({ name: 'nhat_do_chet', ...death }, async (signal) => {
-      await gotoSafe(new goals.GoalNear(death.x, death.y, death.z, 1.5), signal, {
-        maxCombatRetries: 3,
-        resumeCooldownMs: 2500,
-      });
-      await sleep(1500);
-      if (signal.aborted) return;
-      await ctx.equipment?.maintain?.().catch?.(() => {});
-      survival.clearDeath();
-      await memory.flush();
-      replyFn('Đã tới vị trí chết để nhặt lại đồ.');
+      const despawnWatcher = setInterval(() => {
+        if (signal.aborted || abortedForDespawn) return;
+        const mid = survival.evaluateDeathRecovery(death, {
+          fromPos: bot.entity?.position ?? null,
+          maxAgeMs: itemDespawnMs,
+        });
+        if (!mid.ok && (mid.reason === 'despawned_time' || mid.reason === 'will_despawn_on_way')) {
+          abortedForDespawn = true;
+          survival.clearDeath();
+          ctx.scratchpad?.completeActive?.();
+          memory.flush().catch(() => {});
+          stopCurrentTask('Đồ chỗ chết đã/sắp biến mất');
+          replyFn('Đi đường bị cản lâu quá, không kịp tới trước mốc 5 phút đồ tự biến mất nên mình dừng không đi nhặt nữa.');
+        }
+      }, 4000);
+      despawnWatcher.unref?.();
+      try {
+        await gotoSafe(new goals.GoalNear(death.x, death.y, death.z, 1.5), signal, {
+          maxCombatRetries: 3,
+          resumeCooldownMs: 2500,
+        });
+        await sleep(1500);
+        if (signal.aborted) return;
+        await ctx.equipment?.maintain?.().catch?.(() => {});
+        survival.clearDeath();
+        ctx.scratchpad?.completeActive?.();
+        await memory.flush();
+        replyFn('Đã tới vị trí chết để nhặt lại đồ.');
+      } finally {
+        clearInterval(despawnWatcher);
+      }
     }, { onAbort: () => bot.pathfinder?.setGoal(null) });
     run?.promise?.catch(err => {
-      if (run.signal.aborted) return;
+      if (run.signal.aborted || abortedForDespawn) return;
       if (err.name === 'CombatBlocked') {
         replyFn(`Quanh chỗ chết (${death.x}, ${death.y}, ${death.z}) vẫn còn quái nguy hiểm nên mình tạm dừng nhặt đồ; khi nào an toàn bạn gọi "nhặt đồ chết" nhé.`);
         return;

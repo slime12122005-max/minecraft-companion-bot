@@ -2,7 +2,10 @@ import { resolveCandidateNames } from './constants.js';
 import { bestFood, emergencyHeal, autoEat } from './nutrition.js';
 import { isOnFire, isInLava, isNether, handleHazards, performUnstuckStep, clearUnstuckControls } from './hazard_reflex.js';
 import {
+  ITEM_DESPAWN_MS,
+  DEFAULT_MAX_DEATH_DISTANCE,
   recordDeath,
+  evaluateDeathRecovery,
   getPendingDeathRecovery,
   clearDeath,
   checkHealthAlerts,
@@ -29,7 +32,7 @@ import {
   mineTreeLogBlock,
   chopWholeTree,
 } from './gather_tree.js';
-import { ensurePickaxe, gather, giveToOwner } from './gather.js';
+import { ensurePickaxe, gather, giveToOwner, countTargetItems } from './gather.js';
 
 export { resolveCandidateNames, scanNearbyThreats, isSafeSleepDimension, findSafeSleepBed, performUnstuckStep, clearUnstuckControls };
 
@@ -46,6 +49,7 @@ export class SurvivalManager {
     this.lastEatAt = 0;
     this.lastHealAt = 0;
     this.lastPickupAt = 0;
+    this.lastGaveItemAt = 0;
     this.lastAutoReturnAt = 0;
     this.lastWaterExtinguishAt = 0;
     this.pendingWaterPickupAt = 0;
@@ -74,6 +78,9 @@ export class SurvivalManager {
       lookMs: 1500,
       verifyDelayMs: 120,
       dropWaitMs: 300,
+      placeMs: 1500,
+      pillarJumpMs: 450,
+      pillarSettleMs: 80,
     };
   }
 
@@ -93,16 +100,25 @@ export class SurvivalManager {
   stopUnstuck() { return clearUnstuckControls(this); }
 
   recordDeath(entity, dimension) { return recordDeath(this, entity, dimension); }
+  evaluateDeathRecovery(death, opts = {}) {
+    return evaluateDeathRecovery(death, {
+      fromPos: this.bot?.entity?.position ?? null,
+      maxDistance: this.config?.survival?.maxDeathRecoverDistance ?? DEFAULT_MAX_DEATH_DISTANCE,
+      itemDespawnMs: this.config?.survival?.itemDespawnMs ?? ITEM_DESPAWN_MS,
+      ...opts,
+    });
+  }
   getPendingDeathRecovery(opts) { return getPendingDeathRecovery(this, opts); }
   clearDeath() { return clearDeath(this); }
   checkHealthAlerts(opts) { return checkHealthAlerts(this, opts); }
-  pickupNearbyItem() { return pickupNearbyItem(this); }
+  pickupNearbyItem(opts) { return pickupNearbyItem(this, opts); }
   checkAutoReturnCondition(opts) { return checkAutoReturnCondition(this, opts); }
   checkAutoReturn(opts) { return checkAutoReturn(this, opts); }
 
   scanThreats(opts) { return scanNearbyThreats(this.bot, opts); }
 
   ensurePickaxe(tier, signal) { return ensurePickaxe(this, tier, signal); }
+  countMatchingItems(targetText) { return countTargetItems(this, targetText); }
   gather(targetText, count, signal, opts) { return gather(this, targetText, count, signal, opts); }
 
   _gotoWithTimeout(goal, opts) { return gotoWithTimeout(this, goal, opts); }
@@ -121,4 +137,5 @@ export class SurvivalManager {
   listWaypoints() { return listWaypoints(this); }
 }
 
+export { evaluateDeathRecovery };
 export default SurvivalManager;

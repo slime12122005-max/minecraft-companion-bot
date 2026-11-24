@@ -6,7 +6,7 @@ import { findSafeSleepBed, isSafeSleepDimension } from '../survival/index.js';
 const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest', 'barrel']);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-export async function handleBasicCommand(ctx, parsed, { username, reply, parentSignal, say, errorReply }) {
+export async function handleBasicCommand(ctx, parsed, { username, reply, parentSignal, chatCtx, say, errorReply }) {
   const { bot, tasks, router, combat, equipment, home, survival, memory, dashboard, state } = ctx;
 
   async function canOpenNearbyChest() {
@@ -26,17 +26,109 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
   }
 
   switch (parsed.type) {
+    case 'scratchpad_status': {
+      const summary = ctx.scratchpad?.formatRecoverySummary?.({ ownerName: ctx.config?.owner });
+      if (summary) {
+        await say(summary, { kind: 'final' });
+        return true;
+      }
+      const active = ctx.scratchpad?.getActive?.();
+      if (active) {
+        await say(`Bộ nhớ tạm đang theo dõi việc đang chạy: ${active.goal}.`, { kind: 'final' });
+        return true;
+      }
+      await say('Bộ nhớ tạm đang trống, không còn việc gì dở hết nha!', { kind: 'final' });
+      return true;
+    }
+
+    case 'scratchpad_clear': {
+      ctx.scratchpad?.clearRecovery?.();
+      if (!chatCtx?.alreadyAcked) {
+        await say('Ok đã xóa việc dở trong bộ nhớ tạm rồi nha!', { kind: 'final' });
+      }
+      return true;
+    }
+
+    case 'scratchpad_note': {
+      ctx.scratchpad?.setManualTask?.({ goal: parsed.note, note: parsed.note });
+      await say(`Ok đã lưu vào bộ nhớ tạm: "${parsed.note}". Khi nào xong hoặc bảo "bỏ việc cũ" mình sẽ xóa nha!`, { kind: 'final' });
+      return true;
+    }
+
+    case 'scratchpad_resume': {
+      const rec = ctx.scratchpad?.getRecovery?.();
+      const manualNote = ctx.scratchpad?.getManualNote?.();
+      if (!rec && !manualNote) {
+        if (!chatCtx?.alreadyAcked) {
+          await say('Hiện không có việc cũ nào đang dở trong bộ nhớ tạm đâu nha!', { kind: 'final' });
+        }
+        return true;
+      }
+      if (rec?.buildSpec) {
+        if (!chatCtx?.alreadyAcked) {
+          await say(`Ok làm tiếp việc cũ: ${rec.goal}.`, { kind: 'start' });
+        }
+        await ctx.dispatchParsedCommand(
+          { type: rec.buildSpec.mode, file: rec.buildSpec.file, rotation: rec.buildSpec.rotation ?? 0 },
+          username,
+          reply,
+          parentSignal,
+          { ...(chatCtx ?? {}), buildSpec: rec.buildSpec, resumingRecovery: true }
+        );
+        return true;
+      }
+      if (rec?.kind === 'plan' && Array.isArray(rec.planSteps) && rec.planSteps.length > 0 && ctx.dashboardBridge?.onPlanExecute) {
+        if (!chatCtx?.alreadyAcked) {
+          await say(`Ok làm tiếp kế hoạch dở: ${rec.goal}!`, { kind: 'final' });
+        }
+        await ctx.dashboardBridge.onPlanExecute({
+          goal: rec.goal,
+          steps: rec.planSteps,
+          wait: false,
+          resumingRecovery: true,
+        });
+        return true;
+      }
+      if (rec?.kind === 'macro' && rec.macroName && ctx.dashboardBridge?.onMacro) {
+        if (!chatCtx?.alreadyAcked) {
+          await say(`Ok chạy tiếp macro dở: ${rec.macroName}!`, { kind: 'final' });
+        }
+        await ctx.dashboardBridge.onMacro({
+          macro: rec.macroName,
+          wait: false,
+          resumingRecovery: true,
+        });
+        return true;
+      }
+      if (rec?.resumeCommand) {
+        const resumedParsed = ctx.router?.parseChain
+          ? ctx.router.parseChain(rec.resumeCommand)
+          : ctx.router?.parse?.(rec.resumeCommand);
+        if (resumedParsed && resumedParsed.type !== 'unknown') {
+          await ctx.dispatchParsedCommand(resumedParsed, username, reply, parentSignal, {
+            ...(chatCtx ?? {}),
+            userMessage: rec.resumeCommand,
+            resumingRecovery: true,
+          });
+          return true;
+        }
+      }
+      if (!chatCtx?.alreadyAcked) {
+        await say(`Trong bộ nhớ tạm đang ghi chú: "${rec?.goal || manualNote}". Bảo mình làm cụ thể hơn hoặc nhắn "bỏ việc cũ" để xóa nha!`, { kind: 'final' });
+      }
+      return true;
+    }
+
     case 'help':
       await say(router.helpText(), { kind: 'final' });
       return true;
 
     case 'ack':
-      await say('Không có gì! Cần mình làm gì cứ bảo nhé.', { kind: 'final' });
+      await say('Có gì đâu, đồng đội mà! Cần phụ gì cứ hú nha.', { kind: 'final' });
       return true;
 
     case 'greet': {
-      const activeTask = tasks.status().active?.name ?? 'rảnh';
-      await say(`Chào ${username}! Mình đang sẵn sàng (máu ${Math.round(bot.health ?? 20)}/20, đói ${Math.round(bot.food ?? 20)}/20, việc: ${activeTask}).`, { kind: 'final' });
+      await say(`Chào ${username} nha! Đang sẵn sàng đi cùng bạn nè.`, { kind: 'final' });
       return true;
     }
 
@@ -51,6 +143,8 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'follow': {
+      state.stayPut = false;
+      ctx.companion?.stopIdleMotion?.();
       const player = bot.players[username]?.entity;
       if (!player) { await say('Tôi không thấy bạn.', { kind: 'error' }); return true; }
       const followRange = Math.max(2, Math.min(6, Math.round(ctx.config?.humanizer?.personalSpace ?? 3)));
@@ -63,7 +157,7 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
       ctx.humanizer?.expressGesture?.('nod', { unsafe: Boolean(combat.busy || bot.isSleeping) }).catch(() => {});
       if (parentSignal) {
         setFollowGoal();
-        await say('Được, tôi đi theo bạn.', { kind: 'final' });
+        if (!chatCtx?.alreadyAcked) await say('Được, tôi đi theo bạn.', { kind: 'final' });
         return true;
       }
       ctx.stopCurrentTask('Lệnh mới: theo bạn');
@@ -72,11 +166,14 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
         onResume: setFollowGoal,
       });
       setFollowGoal();
-      await say('Được, tôi đi theo bạn.', { kind: 'final' });
+      if (!chatCtx?.alreadyAcked) await say('Được, tôi đi theo bạn.', { kind: 'final' });
       return true;
     }
 
     case 'stay':
+      state.stayPut = true;
+      state.pendingQuantity = null;
+      ctx.companion?.stopIdleMotion?.();
       if (parentSignal) {
         if (bot.pathfinder) bot.pathfinder.setGoal(null);
       } else {
@@ -84,15 +181,19 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
         state.pendingAction = null;
         ctx.stopCurrentTask('Lệnh dừng');
       }
-      await say('Được, tôi đứng yên đây.', { kind: 'final' });
+      if (!chatCtx?.alreadyAcked) await say('Được, tôi đứng yên đây.', { kind: 'final' });
       return true;
 
     case 'come': {
+      state.stayPut = false;
+      ctx.companion?.stopIdleMotion?.();
       const player = bot.players[username]?.entity;
       if (!player?.position) { await say('Tôi không thấy bạn.', { kind: 'error' }); return true; }
       const p = player.position;
       let done = false;
-      say('Đang chạy lại chỗ bạn.', { kind: 'start', isStale: () => done });
+      if (!chatCtx?.alreadyAcked) {
+        say('Đang chạy lại chỗ bạn.', { kind: 'start', isStale: () => done });
+      }
       await ctx.runStepTask({ name: 'lai_day', reason: 'Lệnh lại đây' }, async (signal) => {
         try {
           await ctx.gotoSafe(new goals.GoalNear(p.x, p.y, p.z, 2), signal);
@@ -104,13 +205,19 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'goto': {
+      state.stayPut = false;
+      ctx.companion?.stopIdleMotion?.();
       const { x, y, z } = parsed;
       let done = false;
+      if (!parentSignal) {
+        ctx.scratchpad?.startSingleCommand(parsed, { resumingRecovery: Boolean(chatCtx?.resumingRecovery) });
+      }
       say(`Đang đi tới ${x}, ${y}, ${z}.`, { kind: 'start', isStale: () => done });
       await ctx.runStepTask({ name: 'di_toi', reason: 'Lệnh đi tới tọa độ', x, y, z }, async (signal) => {
         try {
           await ctx.gotoSafe(new goals.GoalNear(x, y, z, 2), signal);
           done = true;
+          if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
           await say(`Đã tới gần ${x}, ${y}, ${z}.`, { kind: 'final' });
         } finally {
           done = true;
@@ -134,14 +241,20 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'goto_waypoint': {
+      state.stayPut = false;
+      ctx.companion?.stopIdleMotion?.();
       const pt = survival.getWaypoint(parsed.name);
       if (!pt) { await say(`Không tìm thấy điểm "${parsed.name}".`, { kind: 'error' }); return true; }
       let done = false;
+      if (!parentSignal) {
+        ctx.scratchpad?.startSingleCommand(parsed, { resumingRecovery: Boolean(chatCtx?.resumingRecovery) });
+      }
       say(`Đang đi tới "${parsed.name}" (${pt.x}, ${pt.y}, ${pt.z}).`, { kind: 'start', isStale: () => done });
       await ctx.runStepTask({ name: 'di_toi_diem', reason: 'Lệnh đi tới điểm đã lưu', target: parsed.name }, async (signal) => {
         try {
           await ctx.gotoSafe(new goals.GoalNear(pt.x, pt.y, pt.z, 2), signal);
           done = true;
+          if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
           await say(`Đã tới "${parsed.name}".`, { kind: 'final' });
         } finally {
           done = true;
@@ -177,14 +290,20 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'go_home': {
+      state.stayPut = false;
+      ctx.companion?.stopIdleMotion?.();
       const target = home.get();
       if (!target) { await say('Chưa có nhà nào được đặt.', { kind: 'error' }); return true; }
       let done = false;
+      if (!parentSignal) {
+        ctx.scratchpad?.startSingleCommand(parsed, { resumingRecovery: Boolean(chatCtx?.resumingRecovery) });
+      }
       say('Đang về nhà.', { kind: 'start', isStale: () => done });
       await ctx.runStepTask({ name: 've_nha', reason: 'Lệnh về nhà' }, async (signal) => {
         try {
           await ctx.gotoSafe(new goals.GoalNear(target.x, target.y, target.z, 2), signal);
           done = true;
+          if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
           await say('Đã về tới nhà.', { kind: 'final' });
         } finally {
           done = true;
@@ -202,6 +321,9 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
         const savedChest = home.getStorageChest();
         if (savedChest) {
           let done = false;
+          if (!parentSignal) {
+            ctx.scratchpad?.startSingleCommand(parsed, { resumingRecovery: Boolean(chatCtx?.resumingRecovery) });
+          }
           say(`Đang chạy tới rương nhà (${savedChest.x}, ${savedChest.y}, ${savedChest.z}) để cất đồ.`, { kind: 'start', isStale: () => done });
           await ctx.runStepTask({ name: 'cat_do', reason: 'Đi tới rương nhà cất đồ' }, async (signal) => {
             try {
@@ -209,11 +331,13 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
               const block = bot.blockAt(new Vec3(savedChest.x, savedChest.y, savedChest.z));
               if (!block || !CHEST_BLOCK_NAMES.has(block.name)) {
                 done = true;
+                if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
                 await say('Không thấy rương tại tọa độ đã lưu.', { kind: 'error' });
                 return;
               }
               const stored = await home.storeSurplus(block);
               done = true;
+              if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
               await say(stored ? 'Đã cất đồ dư vào rương nhà.' : 'Không có đồ dư để cất.', { kind: 'final' });
             } finally {
               done = true;
@@ -234,6 +358,7 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
           home.setStorageChest(chest.position);
         }
         const stored = await home.storeSurplus(chest);
+        if (!parentSignal && chatCtx?.resumingRecovery) ctx.scratchpad?.completeActive();
         await say(stored ? 'Đã cất đồ dư vào rương nhà.' : 'Không có đồ dư để cất.', { kind: 'final' });
       } catch (err) {
         await say(`Không thể cất đồ: ${err.message}`, { kind: 'error' });
@@ -244,6 +369,8 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'sleep': {
+      state.stayPut = false;
+      ctx.companion?.stopIdleMotion?.();
       if (!isSafeSleepDimension(bot.game?.dimension)) {
         await say('Không được dùng giường ở Nether/End vì sẽ phát nổ!', { kind: 'error' });
         return true;
@@ -262,9 +389,17 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'recover_death': {
-      const death = survival.getPendingDeathRecovery({ maxAgeMs: 3600000 });
-      if (!death) { await say('Không có vị trí chết nào gần đây.', { kind: 'error' }); return true; }
-      ctx.startDeathRecoveryTask(death, (msg) => { say(msg, { kind: 'final' }).catch(() => {}); });
+      state.stayPut = false;
+      ctx.companion?.stopIdleMotion?.();
+      const rawDeath = memory.get('lastDeath');
+      if (!rawDeath) {
+        await say('Không có vị trí chết nào còn đồ để nhặt (hoặc đã quá xa/quá 5 phút tự biến mất).', { kind: 'error' });
+        return true;
+      }
+      const started = ctx.startDeathRecoveryTask(rawDeath, (msg) => { say(msg, { kind: 'final' }).catch(() => {}); });
+      if (started && !parentSignal) {
+        ctx.scratchpad?.startSingleCommand(parsed, { resumingRecovery: Boolean(chatCtx?.resumingRecovery) });
+      }
       return true;
     }
 
@@ -284,14 +419,19 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
         const hits = home.findInChests(parsed.target);
         const posHint = hits[0] ?? home.getStorageChest();
         if (!posHint) { await say(`Không tìm thấy rương nào chứa "${parsed.target}".`, { kind: 'error' }); return true; }
+        if (!parentSignal) {
+          ctx.scratchpad?.startSingleCommand(parsed, { resumingRecovery: Boolean(chatCtx?.resumingRecovery) });
+        }
         await ctx.runStepTask({ name: 'lay_tu_ruong', reason: 'Lấy đồ từ rương', target: parsed.target }, async (signal) => {
           await ctx.gotoSafe(new goals.GoalGetToBlock(posHint.x, posHint.y, posHint.z), signal);
           const block = bot.blockAt(new Vec3(posHint.x, posHint.y, posHint.z));
           if (!block || !CHEST_BLOCK_NAMES.has(block.name)) {
+            if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
             await say('Không thấy rương tại tọa độ đã nhớ.', { kind: 'error' });
             return;
           }
           const res = await home.takeFromChest(block, parsed.target, parsed.count);
+          if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
           await memory.flush();
           await say(res.count > 0 ? `Đã lấy ${res.count} ${res.name} từ rương.` : `Trong rương không còn ${parsed.target}.`, { kind: 'final' });
         }, { errPrefix: 'Không lấy được từ rương', onError: errorReply }, parentSignal, reply);
@@ -346,6 +486,21 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
       await say('Đã bật lại chế độ tự vệ và chiến đấu.', { kind: 'final' });
       return true;
 
+    case 'auto_farm_on':
+      state.autoFarmEnabled = true;
+      state.stayPut = false;
+      await say('Đã bật chế độ tự farm đồ khi rảnh!', { kind: 'final' });
+      ctx.companion?.tickSurvivalAutonomy?.(Date.now(), { force: true }).catch?.(() => {});
+      return true;
+
+    case 'auto_farm_off':
+      state.autoFarmEnabled = false;
+      if (tasks.active?.task?.autoFarm) {
+        ctx.stopCurrentTask('Tắt tự farm');
+      }
+      await say('Đã tắt chế độ tự farm khi rảnh.', { kind: 'final' });
+      return true;
+
     case 'eat': {
       const ate = await survival.autoEat({ force: true });
       await say(ate ? 'Đã ăn hồi đói.' : 'Mình đang no hoặc chưa có đồ ăn trong túi.', { kind: 'final' });
@@ -353,8 +508,12 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
     }
 
     case 'drop_junk': {
-      const dropped = await equipment.discardObsoleteItems({ force: true });
-      await say(dropped.length ? `Đã vứt đồ cấp thấp: ${dropped.join(', ')}.` : 'Không có đồ cũ/dởm nào để vứt.', { kind: 'final' });
+      const obsolete = await equipment.discardObsoleteItems({ force: true });
+      const junk = typeof equipment.discardJunkItems === 'function'
+        ? await equipment.discardJunkItems({ force: true })
+        : [];
+      const dropped = [...obsolete, ...junk];
+      await say(dropped.length ? `Đã vứt đồ thừa/cấp thấp: ${dropped.join(', ')}.` : 'Túi gọn rồi, không có đồ thừa nào để vứt.', { kind: 'final' });
       return true;
     }
 

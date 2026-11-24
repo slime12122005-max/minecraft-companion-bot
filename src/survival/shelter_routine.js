@@ -2,6 +2,11 @@ import pf from 'mineflayer-pathfinder';
 const { goals } = pf;
 import { normalizeText } from '../commands.js';
 
+export const ITEM_DESPAWN_MS = 300_000;
+export const DEATH_PICKUP_MARGIN_MS = 20_000;
+export const DEATH_RECOVERY_SPEED_BPS = 2.6;
+export const DEFAULT_MAX_DEATH_DISTANCE = 350;
+
 export function recordDeath(ctx, entity, dimension = 'overworld') {
   if (!entity?.position) return null;
   const pos = entity.position;
@@ -45,12 +50,99 @@ export function recordDeath(ctx, entity, dimension = 'overworld') {
   return death;
 }
 
-export function getPendingDeathRecovery(ctx, { maxAgeMs = 240000, currentDimension = null, allowUnrecoverable = false } = {}) {
+export function evaluateDeathRecovery(
+  death,
+  {
+    fromPos = null,
+    currentDimension = null,
+    now = Date.now(),
+    maxAgeMs = ITEM_DESPAWN_MS,
+    maxDistance = DEFAULT_MAX_DEATH_DISTANCE,
+    itemDespawnMs = ITEM_DESPAWN_MS,
+    allowUnrecoverable = false,
+  } = {}
+) {
+  if (!death) {
+    return { ok: false, reason: 'none', shouldClear: false, distance: null, estimatedTravelMs: null, remainingMs: 0 };
+  }
+  if (!allowUnrecoverable && death.unrecoverable) {
+    return {
+      ok: false,
+      reason: death.unrecoverableReason || 'unrecoverable',
+      shouldClear: true,
+      distance: null,
+      estimatedTravelMs: null,
+      remainingMs: 0,
+    };
+  }
+
+  const despawnLimitMs = Math.max(1000, Number(itemDespawnMs ?? ITEM_DESPAWN_MS));
+  const effectiveMaxAgeMs = Math.min(despawnLimitMs, Number(maxAgeMs ?? despawnLimitMs));
+  const ageMs = Math.max(0, now - Number(death.diedAt ?? 0));
+  const remainingMs = Math.max(0, despawnLimitMs - ageMs);
+
+  if (ageMs > effectiveMaxAgeMs) {
+    return {
+      ok: false,
+      reason: 'despawned_time',
+      shouldClear: ageMs >= despawnLimitMs,
+      distance: null,
+      estimatedTravelMs: null,
+      remainingMs: 0,
+    };
+  }
+
+  if (currentDimension && death.dimension && String(currentDimension) !== String(death.dimension)) {
+    return {
+      ok: false,
+      reason: 'wrong_dimension',
+      shouldClear: false,
+      distance: null,
+      estimatedTravelMs: null,
+      remainingMs,
+    };
+  }
+
+  if (fromPos && Number.isFinite(fromPos.x) && Number.isFinite(fromPos.y) && Number.isFinite(fromPos.z)) {
+    const dx = fromPos.x - death.x;
+    const dy = fromPos.y - death.y;
+    const dz = fromPos.z - death.z;
+    const distance = Math.hypot(dx, dy, dz);
+    const effectiveDist = Math.hypot(dx, dz) + Math.abs(dy) * 2.5;
+    const estimatedTravelMs = Math.round((effectiveDist / DEATH_RECOVERY_SPEED_BPS) * 1000);
+    const maxDistLimit = Number(maxDistance ?? DEFAULT_MAX_DEATH_DISTANCE);
+
+    if (distance > maxDistLimit) {
+      return { ok: false, reason: 'too_far', shouldClear: true, distance, estimatedTravelMs, remainingMs };
+    }
+    if (estimatedTravelMs + DEATH_PICKUP_MARGIN_MS > remainingMs) {
+      return { ok: false, reason: 'will_despawn_on_way', shouldClear: true, distance, estimatedTravelMs, remainingMs };
+    }
+    return { ok: true, reason: null, shouldClear: false, distance, estimatedTravelMs, remainingMs };
+  }
+
+  return { ok: true, reason: null, shouldClear: false, distance: null, estimatedTravelMs: null, remainingMs };
+}
+
+export function getPendingDeathRecovery(
+  ctx,
+  { maxAgeMs = 240000, currentDimension = null, allowUnrecoverable = false, fromPos = undefined, maxDistance = undefined } = {}
+) {
   const death = ctx.memory?.get('lastDeath');
   if (!death) return null;
-  if (!allowUnrecoverable && death.unrecoverable) return null;
-  if (Date.now() - death.diedAt > maxAgeMs) return null;
-  if (currentDimension && death.dimension && String(currentDimension) !== String(death.dimension)) {
+  const pos = fromPos === undefined ? (ctx.bot?.entity?.position ?? null) : fromPos;
+  const maxDist = maxDistance ?? ctx.config?.survival?.maxDeathRecoverDistance ?? DEFAULT_MAX_DEATH_DISTANCE;
+  const itemDespawnMs = ctx.config?.survival?.itemDespawnMs ?? ITEM_DESPAWN_MS;
+  const res = evaluateDeathRecovery(death, {
+    fromPos: pos,
+    currentDimension,
+    maxAgeMs,
+    maxDistance: maxDist,
+    itemDespawnMs,
+    allowUnrecoverable,
+  });
+  if (!res.ok) {
+    if (res.shouldClear) clearDeath(ctx);
     return null;
   }
   return death;
@@ -108,8 +200,10 @@ export function checkHealthAlerts(ctx, { ownerName } = {}) {
   return alerts;
 }
 
-export function pickupNearbyItem(ctx) {
+export function pickupNearbyItem(ctx, { stayPut = false } = {}) {
+  if (stayPut) return false;
   const now = Date.now();
+  if (now - (ctx.lastGaveItemAt ?? 0) < 8000) return false;
   if (now - ctx.lastPickupAt < 3000) return false;
   if (!ctx.bot.entity?.position || !ctx.bot.pathfinder) return false;
   if (typeof ctx.bot.inventory?.emptySlotCount === 'function' && ctx.bot.inventory.emptySlotCount() <= 0) {
@@ -134,7 +228,7 @@ export function pickupNearbyItem(ctx) {
   }
 }
 
-export function checkAutoReturnCondition(ctx, { busy = false } = {}) {
+export function checkAutoReturnCondition(ctx, { busy = false, ownerEntity = null } = {}) {
   if (!ctx.config.home?.autoReturn || busy || !ctx.home?.get?.()) return null;
   const now = Date.now();
   if (now - ctx.lastAutoReturnAt < 120000) return null;
@@ -143,6 +237,16 @@ export function checkAutoReturnCondition(ctx, { busy = false } = {}) {
   const isNight = typeof timeOfDay === 'number' && timeOfDay >= 13000 && timeOfDay <= 23000;
   const isFull = typeof ctx.bot.inventory?.emptySlotCount === 'function' && ctx.bot.inventory.emptySlotCount() === 0;
   if (!isNight && !isFull) return null;
+
+  if (
+    isNight &&
+    !isFull &&
+    ownerEntity?.position &&
+    ctx.bot.entity?.position &&
+    ctx.bot.entity.position.distanceTo(ownerEntity.position) <= 24
+  ) {
+    return null;
+  }
 
   const reason = isFull ? 'túi đồ đã đầy' : 'trời đã tối';
   ctx.lastAutoReturnAt = now;

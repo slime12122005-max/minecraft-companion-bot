@@ -14,6 +14,18 @@ import { Logger } from './logger.js';
 import { DashboardServer } from './dashboard.js';
 import { createBotSession } from './session.js';
 import { ConnectionManager } from './session/connection_manager.js';
+import {
+  LanDiscovery,
+  explainConnectionIssue,
+  isE4mcHost,
+  isLocalHostAddress,
+  isSameHost,
+  parseConsoleConnectInput,
+  parseServerAddress,
+  probeMinecraftServer,
+  probeTcpPort,
+  resolveWorldDbPath,
+} from './session/lan_discovery.js';
 
 export { createBotSession };
 
@@ -59,7 +71,7 @@ async function runDoctor() {
   let config;
   try {
     config = loadConfig();
-    console.log(`OK: config hợp lệ (${config.minecraft.host}:${config.minecraft.port}, owner=${config.owner})`);
+    console.log(`OK: config hợp lệ (${config.minecraft.host}:${config.minecraft.port}, version=${config.minecraft.version}, autoDiscoverLan=${Boolean(config.minecraft.autoDiscoverLan)}, owner=${config.owner})`);
   } catch (err) {
     console.error(`ERR: config lỗi: ${err.message}`);
     ok = false;
@@ -83,6 +95,7 @@ async function runDoctor() {
 
   if (config?.dashboard?.enabled) {
     console.log(`OK: System 2 (Não chính Antigravity MCP) - http://${config.dashboard.host}:${config.dashboard.port}`);
+    console.log(`OK: Model giao tiếp Antigravity mặc định - ${config?.companion?.agentModel ?? 'gemini-4-hydrogen-low'}`);
   } else {
     console.log('WARN: System 2 (Não chính Antigravity MCP) - dashboard.enabled=false (MCP không kết nối được)');
   }
@@ -105,6 +118,57 @@ export function parseCliPort(argv = process.argv) {
   return null;
 }
 
+export function parseCliHost(argv = process.argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if ((arg === '--host' || arg === '--connect' || arg === '--e4mc') && i + 1 < argv.length) {
+      const h = String(argv[i + 1]).trim();
+      if (h) return h;
+    }
+    for (const prefix of ['--host=', '--connect=', '--e4mc=']) {
+      if (arg.startsWith(prefix)) {
+        const h = arg.slice(prefix.length).trim();
+        if (h) return h;
+      }
+    }
+  }
+  return null;
+}
+
+export function parseCliAuth(argv = process.argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--auth' && i + 1 < argv.length) {
+      const a = String(argv[i + 1]).trim().toLowerCase();
+      if (a === 'offline' || a === 'microsoft') return a;
+    }
+    if (arg.startsWith('--auth=')) {
+      const a = arg.slice('--auth='.length).trim().toLowerCase();
+      if (a === 'offline' || a === 'microsoft') return a;
+    }
+  }
+  return null;
+}
+
+export function parseCliVersion(argv = process.argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--version' && i + 1 < argv.length) {
+      const v = String(argv[i + 1]).trim();
+      if (v) return v;
+    }
+    if (arg.startsWith('--version=')) {
+      const v = arg.slice('--version='.length).trim();
+      if (v) return v;
+    }
+  }
+  return null;
+}
+
+export function hasAutoLanFlag(argv = process.argv) {
+  return argv.includes('--auto-lan');
+}
+
 export function persistLanConfig(config, configPath = 'config.json') {
   let existing = {};
   try {
@@ -112,13 +176,33 @@ export function persistLanConfig(config, configPath = 'config.json') {
       existing = JSON.parse(readFileSync(configPath, 'utf8'));
     }
   } catch {}
+  const persistedVersion = existing?.minecraft?.version === 'auto'
+    ? 'auto'
+    : config.minecraft.version;
+  const extraMinecraft = {};
+  if (existing?.minecraft?.autoDiscoverLan !== undefined) {
+    extraMinecraft.autoDiscoverLan = existing.minecraft.autoDiscoverLan;
+  } else if (config.minecraft.autoDiscoverLan !== undefined) {
+    extraMinecraft.autoDiscoverLan = config.minecraft.autoDiscoverLan;
+  }
+  if (config.minecraft.auth !== undefined) {
+    extraMinecraft.auth = config.minecraft.auth;
+  } else if (existing?.minecraft?.auth !== undefined) {
+    extraMinecraft.auth = existing.minecraft.auth;
+  }
+  if (config.minecraft.profilesFolder !== undefined) {
+    extraMinecraft.profilesFolder = config.minecraft.profilesFolder;
+  } else if (existing?.minecraft?.profilesFolder !== undefined) {
+    extraMinecraft.profilesFolder = existing.minecraft.profilesFolder;
+  }
   const updated = deepMerge(existing, {
     minecraft: {
       ...(existing.minecraft ?? {}),
       host: config.minecraft.host,
       port: config.minecraft.port,
       username: config.minecraft.username,
-      version: config.minecraft.version,
+      version: persistedVersion,
+      ...extraMinecraft,
     },
     owner: config.owner,
   });
@@ -133,11 +217,38 @@ async function main() {
 
   const logger = new Logger({ file: 'data/bot.log' });
   const config = loadConfig();
+  const cliHostRaw = parseCliHost();
   const cliPort = parseCliPort();
+  const cliVersion = parseCliVersion();
+  const cliAuth = parseCliAuth();
+  if (cliHostRaw) {
+    const parsedCli = parseServerAddress(cliHostRaw, { defaultPort: cliPort ?? 25565 });
+    if (parsedCli?.host) {
+      config.minecraft.host = parsedCli.host;
+      if (parsedCli.explicitPort && !cliPort) {
+        config.minecraft.port = parsedCli.port;
+      } else if (!cliPort && isE4mcHost(parsedCli.host)) {
+        config.minecraft.port = 25565;
+      }
+    }
+  }
   if (cliPort) {
     config.minecraft.port = cliPort;
+  }
+  if (isE4mcHost(config.minecraft.host) && !cliPort && !cliHostRaw && config.minecraft.port !== 25565) {
+    logger.write('INFO', 'bot', `ℹ️ Host e4mc (${config.minecraft.host}) dùng cổng 25565 (tự chỉnh từ ${config.minecraft.port}).`);
+    config.minecraft.port = 25565;
+  }
+  if (cliVersion) {
+    config.minecraft.version = cliVersion;
+  }
+  if (cliAuth) {
+    config.minecraft.auth = cliAuth;
+  }
+  if (cliHostRaw || cliPort || cliVersion || cliAuth) {
     try { persistLanConfig(config); } catch {}
   }
+  const autoLanEnabled = !cliPort && !cliHostRaw && Boolean(config.minecraft.autoDiscoverLan || hasAutoLanFlag());
 
   const apiKeyEnv = resolveApiKeyEnv(config.llm);
   const apiKey = apiKeyEnv ? process.env[apiKeyEnv] : undefined;
@@ -149,35 +260,48 @@ async function main() {
     maxRequestsPerMin: config.llm.maxRequestsPerMin,
   });
 
-  const memory = new Memory({ dbPath: 'data/bot_memory.db', legacyJsonPath: 'data/memory.json' });
+  let currentDbPath = resolveWorldDbPath(config.minecraft.worldName);
+  let memory = new Memory({ dbPath: currentDbPath, legacyJsonPath: 'data/memory.json' });
   await memory.load();
   const tasks = new TaskCoordinator({ log: logger.scoped('task') });
   const router = new CommandRouter();
 
   let stopping = false;
+  let waitingForLan = false;
+  let connectingNow = false;
+  let lanDiscovery = null;
+  let reconnectInFlightKey = null;
   const connMgr = new ConnectionManager({ baseDelayMs: 3000, maxDelayMs: 30000 });
   let reconnectTimer = null;
   let activeSession = null;
+  let sidecarPolled = false;
+  let gameSessionSeq = 1;
+  let currentGameSessionId = `game_${Date.now()}_${gameSessionSeq}`;
   const inboxState = { seq: 0, items: [] };
+
+  const fallbackGetState = () => ({
+    sessionId: null,
+    username: config.minecraft.username,
+    connected: false,
+    lan: {
+      host: config.minecraft.host,
+      port: config.minecraft.port,
+      owner: config.owner,
+      version: config.minecraft.version === false ? 'auto' : config.minecraft.version,
+      worldName: config.minecraft.worldName ?? null,
+    },
+    health: 0,
+    food: 0,
+    task: waitingForLan ? 'đang chờ mở mạng LAN' : 'đang chờ kết nối',
+    logs: logger.recent(40),
+  });
 
   const dashboard = new DashboardServer({
     host: config.dashboard?.host ?? '127.0.0.1',
     port: config.dashboard?.port ?? 3000,
     authToken: config.dashboard?.token ?? null,
     log: logger.scoped('web'),
-    getState: () => ({
-      username: config.minecraft.username,
-      connected: false,
-      lan: {
-        host: config.minecraft.host,
-        port: config.minecraft.port,
-        owner: config.owner,
-      },
-      health: 0,
-      food: 0,
-      task: 'đang chờ kết nối',
-      logs: logger.recent(40),
-    }),
+    getState: fallbackGetState,
     onConnect: handleReconnectRequest,
     onGetNearby: () => ({
       connected: false,
@@ -189,38 +313,84 @@ async function main() {
       items: [],
       blocks: {},
     }),
-    getInbox: ({ sinceId = 0, limit = 30 } = {}) => ({
-      latestId: inboxState.seq,
-      messages: inboxState.items.filter(item => item.id > sinceId).slice(-limit),
-    }),
+    getInbox: ({ sinceId = 0, limit = 30, source = null } = {}) => {
+      if (source === 'sidecar') sidecarPolled = true;
+      return {
+        sessionId: null,
+        latestId: inboxState.seq,
+        messages: inboxState.items.filter(item => item.id > sinceId).slice(-limit),
+      };
+    },
     onSay: () => ({ ok: false, status: 409, error: 'Bot chưa kết nối vào server' }),
   });
 
-  async function handleReconnectRequest({ host, port, owner }) {
+  async function switchWorldMemory(worldName) {
+    const cleanName = worldName != null ? String(worldName).trim() : '';
+    config.minecraft.worldName = cleanName || null;
+    const nextDbPath = resolveWorldDbPath(config.minecraft.worldName);
+    if (nextDbPath === currentDbPath) return;
+    await memory.flush?.().catch(() => {});
+    memory.close?.();
+    memory = new Memory({ dbPath: nextDbPath });
+    await memory.load();
+    currentDbPath = nextDbPath;
+    logger.write('INFO', 'memory', `💾 Dùng bộ nhớ riêng cho thế giới "${config.minecraft.worldName || 'mặc định'}" (${nextDbPath})`);
+  }
+
+  async function handleReconnectRequest({ host, port, owner, version, auth, worldName } = {}) {
+    let parsedHostAddr = null;
     if (host) {
-      const cleanHost = String(host).trim();
-      if (!/^[a-zA-Z0-9._:-]{1,253}$/.test(cleanHost)) {
+      parsedHostAddr = parseServerAddress(host, { defaultPort: port != null ? Number(port) : 25565 });
+      if (!parsedHostAddr || !parsedHostAddr.host) {
         throw new Error('Host không hợp lệ');
       }
-      config.minecraft.host = cleanHost;
+      config.minecraft.host = parsedHostAddr.host;
+      if (port == null) {
+        config.minecraft.port = parsedHostAddr.port;
+      }
     }
-    config.minecraft.port = port;
+    if (port != null) {
+      const portNum = Number(port);
+      if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+        throw new Error('Cổng không hợp lệ');
+      }
+      config.minecraft.port = parsedHostAddr?.isE4mc && parsedHostAddr.explicitPort
+        ? parsedHostAddr.port
+        : portNum;
+      if (!host && !isLocalHostAddress(config.minecraft.host)) {
+        config.minecraft.host = '127.0.0.1';
+      }
+    }
     if (owner) config.owner = String(owner).trim().slice(0, 16);
+    if (version != null && String(version).trim()) {
+      config.minecraft.version = String(version).trim().slice(0, 32);
+    }
+    if (auth === 'offline' || auth === 'microsoft') {
+      config.minecraft.auth = auth;
+    }
+    waitingForLan = false;
     try { persistLanConfig(config); } catch (err) {
       logger.warn('config', `Không lưu được config.json: ${err.message}`);
     }
-    logger.write('INFO', 'bot', `🔄 Chuyển kết nối LAN sang ${config.minecraft.host}:${config.minecraft.port} (owner=${config.owner})...`);
+    const worldLabel = worldName ? ` [${worldName}]` : '';
+    const authLabel = config.minecraft.auth === 'microsoft' ? ', auth=microsoft' : '';
+    logger.write('INFO', 'bot', `🔄 Chuyển kết nối LAN/Server sang ${config.minecraft.host}:${config.minecraft.port}${worldLabel} (version=${config.minecraft.version}, owner=${config.owner}${authLabel})...`);
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
     connMgr.resetBackoff();
+    gameSessionSeq += 1;
+    currentGameSessionId = `game_${Date.now()}_${gameSessionSeq}`;
     const oldSession = activeSession;
     activeSession = null;
     if (oldSession) {
       oldSession._manualRestart = true;
       await oldSession.cleanup().catch(() => {});
       try { oldSession.bot.quit?.(); } catch {}
+    }
+    if (worldName !== undefined) {
+      await switchWorldMemory(worldName);
     }
     connect();
   }
@@ -229,6 +399,17 @@ async function main() {
     try {
       const addr = await dashboard.start();
       console.log(`🌐 Web Dashboard: http://${addr.host}:${addr.port}`);
+      const sidecarHintTimer = setTimeout(() => {
+        if (!stopping && !sidecarPolled && !(activeSession?.state?.lastSidecarPollAt > 0)) {
+          const modelSlug = config.companion?.agentModel ?? 'gemini-4-hydrogen-low';
+          logger.write(
+            'INFO',
+            'antigravity',
+            `💡 Chế độ chat người thật tại chỗ đang bật. Để nối thêm não ${modelSlug}, hãy bật plugin "Minecraft Bot Companion" trong Antigravity!`
+          );
+        }
+      }, 4500);
+      sidecarHintTimer.unref?.();
     } catch (err) {
       logger.warn('web', `Không mở được web dashboard: ${err.message}`);
     }
@@ -237,31 +418,32 @@ async function main() {
   let rl = null;
   if (process.stdin.isTTY) {
     rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    if (!cliPort && !process.argv.includes('--no-prompt')) {
+    if (!cliPort && !cliHostRaw && !autoLanEnabled && !process.argv.includes('--no-prompt')) {
       const entered = await new Promise((resolve) => {
-        rl.question(`Nhập cổng LAN Minecraft (Enter để dùng ${config.minecraft.port}): `, resolve);
+        rl.question(`Nhập cổng LAN hoặc domain e4mc (Enter để dùng ${config.minecraft.host}:${config.minecraft.port}): `, resolve);
       });
       const trimmed = String(entered ?? '').trim();
       if (trimmed) {
-        const parsedPort = Number(trimmed);
-        if (Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535) {
-          config.minecraft.port = parsedPort;
+        const parsedPrompt = parseServerAddress(trimmed, { defaultPort: 25565 });
+        if (parsedPrompt) {
+          if (parsedPrompt.host) config.minecraft.host = parsedPrompt.host;
+          config.minecraft.port = parsedPrompt.port;
           try { persistLanConfig(config); } catch {}
         } else {
-          console.log(`⚠️ Cổng "${trimmed}" không hợp lệ, giữ cổng ${config.minecraft.port}.`);
+          console.log(`⚠️ Địa chỉ "${trimmed}" không hợp lệ, giữ ${config.minecraft.host}:${config.minecraft.port}.`);
         }
       }
     }
-    console.log('💡 Đang chạy trong CMD — gõ số cổng LAN mới (vd: 54321) để đổi server, hoặc gõ thẳng lệnh bot (vd: theo tôi).');
+    console.log('💡 Đang chạy trong CMD — gõ cổng LAN (vd: 54321) hoặc domain e4mc (vd: xxx.e4mc.link) để đổi server, hoặc gõ thẳng lệnh bot (vd: theo tôi).');
     rl.on('line', (line) => {
       const text = String(line ?? '').trim();
       if (!text) return;
-      if (/^\d{1,5}$/.test(text)) {
-        const nextPort = Number(text);
-        if (nextPort >= 1 && nextPort <= 65535) {
-          handleReconnectRequest({ port: nextPort }).catch(err => logger.error('cmd', err.message));
-          return;
-        }
+      const target = parseConsoleConnectInput(text);
+      if (target) {
+        const req = { port: target.port };
+        if (target.host) req.host = target.host;
+        handleReconnectRequest(req).catch(err => logger.error('cmd', err.message));
+        return;
       }
       if (activeSession?.onCommand) {
         Promise.resolve(activeSession.onCommand(text)).catch(err => logger.error('cmd', err.message));
@@ -273,7 +455,11 @@ async function main() {
 
   function connect() {
     if (stopping) return;
-    logger.write('INFO', 'bot', `🔌 Đang kết nối tới ${config.minecraft.host}:${config.minecraft.port}...`);
+    waitingForLan = false;
+    connectingNow = true;
+    const authTag = config.minecraft.auth === 'microsoft' ? ', auth=microsoft' : '';
+    logger.write('INFO', 'bot', `🔌 Đang kết nối tới ${config.minecraft.host}:${config.minecraft.port} (version=${config.minecraft.version}${authTag})...`);
+    let lastIssueCode = null;
     const session = createBotSession(config, {
       llm,
       memory,
@@ -283,25 +469,55 @@ async function main() {
       onConnect: handleReconnectRequest,
       externalDashboard: dashboard,
       inboxState,
+      sessionId: currentGameSessionId,
     });
     activeSession = session;
 
     session.bot.once('spawn', () => {
+      lastIssueCode = null;
+      connectingNow = false;
       connMgr.markConnected();
     });
 
     session.bot.on('kicked', (reason) => {
       connMgr.markKicked(reason);
+      lastIssueCode = explainConnectionIssue(reason, config)?.code ?? lastIssueCode;
+    });
+
+    session.bot.on('error', (err) => {
+      lastIssueCode = explainConnectionIssue(err, config)?.code ?? lastIssueCode;
     });
 
     session.bot.once('end', async () => {
       if (session._manualRestart) return;
-      if (activeSession === session) activeSession = null;
+      connectingNow = false;
+      if (activeSession === session) {
+        activeSession = null;
+        dashboard.getState = fallbackGetState;
+      }
       connMgr.markDisconnected();
       logger.warn('bot', '🔌 Bot đã ngắt kết nối.');
       await session.cleanup();
       if (!stopping) {
-        const delayMs = connMgr.nextReconnectDelayMs();
+        if (autoLanEnabled && isLocalHostAddress(config.minecraft.host)) {
+          const reachable = await probeTcpPort(config.minecraft.host, config.minecraft.port, 500);
+          if (!reachable) {
+            waitingForLan = true;
+            gameSessionSeq += 1;
+            currentGameSessionId = `game_${Date.now()}_${gameSessionSeq}`;
+            connMgr.resetBackoff();
+            logger.write('INFO', 'bot', `📡 Thế giới LAN (${config.minecraft.port}) đã đóng. Đang chờ thế giới tiếp theo...`);
+            return;
+          }
+        }
+        const rawDelayMs = connMgr.nextReconnectDelayMs();
+        const delayMs = (
+          lastIssueCode === 'online_mode_required' ||
+          lastIssueCode === 'e4mc_domain_inactive' ||
+          lastIssueCode === 'modded_client_required'
+        )
+          ? Math.max(rawDelayMs, 20000)
+          : rawDelayMs;
         logger.write('INFO', 'bot', `🔄 Thử kết nối lại sau ${delayMs / 1000}s...`);
         reconnectTimer = setTimeout(connect, delayMs);
         reconnectTimer.unref?.();
@@ -313,6 +529,7 @@ async function main() {
     if (stopping) return;
     stopping = true;
     rl?.close();
+    lanDiscovery?.stop?.();
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (activeSession) {
       await activeSession.cleanup();
@@ -328,7 +545,81 @@ async function main() {
   process.once('SIGTERM', shutdown);
   rl?.once('SIGINT', shutdown);
 
-  connect();
+  if (autoLanEnabled) {
+    let resolveInitialLanWait = null;
+    lanDiscovery = new LanDiscovery({
+      log: logger.scoped('lan'),
+      onWorld: (entry, activeList) => {
+        if (stopping) return;
+        const ownerLower = String(config.owner || '').toLowerCase();
+        const matchesOwner = Boolean(entry.ownerHint && entry.ownerHint.toLowerCase() === ownerLower);
+        const anyOwnerActive = activeList.some(
+          (w) => w.ownerHint && w.ownerHint.toLowerCase() === ownerLower
+        );
+        if (anyOwnerActive && !matchesOwner) return;
+        if (!matchesOwner && !isSameHost(entry.host, '127.0.0.1')) return;
+
+        resolveInitialLanWait?.();
+        resolveInitialLanWait = null;
+
+        const sameTarget = isSameHost(config.minecraft.host, entry.host) && config.minecraft.port === entry.port;
+        const targetKey = `${entry.host}:${entry.port}`;
+        const shouldSwitch =
+          waitingForLan ||
+          (!activeSession && !connectingNow) ||
+          (entry.isNew && !sameTarget && (matchesOwner || !connMgr.connected));
+
+        if (!shouldSwitch || reconnectInFlightKey === targetKey) return;
+        reconnectInFlightKey = targetKey;
+        logger.write(
+          'INFO',
+          'lan',
+          `📡 Phát hiện LAN "${entry.worldName || entry.motd}" tại ${entry.host}:${entry.port}${entry.ownerHint ? ` (${entry.ownerHint})` : ''}`
+        );
+        handleReconnectRequest({
+          host: entry.host,
+          port: entry.port,
+          version: 'auto',
+          worldName: entry.worldName,
+        })
+          .catch((err) => logger.warn('lan', `Không kết nối được ${targetKey}: ${err.message}`))
+          .finally(() => {
+            if (reconnectInFlightKey === targetKey) reconnectInFlightKey = null;
+          });
+      },
+    });
+    lanDiscovery.start();
+
+    await new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolveInitialLanWait = null;
+        clearTimeout(timer);
+        resolve();
+      };
+      resolveInitialLanWait = done;
+      const timer = setTimeout(done, 1800);
+      timer.unref?.();
+    });
+
+    if (!stopping && !activeSession && !connectingNow && !reconnectInFlightKey) {
+      if (!isLocalHostAddress(config.minecraft.host)) {
+        connect();
+      } else {
+        const reachable = await probeMinecraftServer(config.minecraft.host, config.minecraft.port, 600);
+        if (reachable) {
+          connect();
+        } else {
+          waitingForLan = true;
+          logger.write('INFO', 'bot', '📡 Đang tự động chờ bạn bấm "Open to LAN" trong bất kỳ bản Minecraft nào (hoặc gõ cổng / domain e4mc vào CMD)...');
+        }
+      }
+    }
+  } else {
+    connect();
+  }
 }
 
 const isEntrypoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

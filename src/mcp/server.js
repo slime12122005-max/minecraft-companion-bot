@@ -1,6 +1,7 @@
 import path from 'node:path';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { parseServerAddress } from '../session/lan_discovery.js';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   '2025-06-18',
@@ -171,7 +172,7 @@ export const TOOLS = [
   },
   {
     name: 'mc_connect',
-    description: 'Kết nối hoặc chuyển bot sang cổng LAN / server Minecraft mới.',
+    description: 'Kết nối hoặc chuyển bot sang cổng LAN / domain e4mc / server Minecraft mới (hỗ trợ nhập domain *.e4mc.link không cần cổng, mặc định 25565).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -179,19 +180,28 @@ export const TOOLS = [
           type: 'integer',
           minimum: 1,
           maximum: 65535,
-          description: 'Cổng LAN hoặc server Minecraft (1-65535).',
+          description: 'Cổng LAN hoặc server Minecraft (1-65535). Có thể bỏ trống nếu đã truyền host (mặc định 25565).',
         },
         host: {
           type: 'string',
-          description: 'Địa chỉ host (mặc định localhost).',
+          description: 'Địa chỉ host hoặc domain e4mc (vd: localhost, happy-panda.sg.e4mc.link, hoặc host:port).',
         },
         owner: {
           type: 'string',
           maxLength: 16,
           description: 'Tên nhân vật chủ nhân nếu muốn đổi.',
         },
+        version: {
+          type: 'string',
+          maxLength: 32,
+          description: 'Phiên bản Minecraft (vd: 1.21.1, 1.20.1, hoặc auto để tự nhận diện).',
+        },
+        auth: {
+          type: 'string',
+          enum: ['offline', 'microsoft'],
+          description: 'Chế độ đăng nhập: offline (mặc định) hoặc microsoft (cần khi e4mc/server bật Online Mode).',
+        },
       },
-      required: ['port'],
       additionalProperties: false,
     },
   },
@@ -320,6 +330,35 @@ export const TOOLS = [
         force: {
           type: 'boolean',
           description: 'Khi action=collect: ép thu lò ngay cả khi chưa hết thời gian dự kiến.',
+        },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'mc_scratchpad',
+    description: 'Đọc, lưu, chạy tiếp hoặc xóa bộ nhớ tạm các việc đang làm dở (chống mất tiến độ khi tắt máy đột xuất; tự xóa khi làm xong hoặc khi chủ nhân bảo bỏ).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['get', 'set', 'resume', 'clear'],
+          description: 'Thao tác bộ nhớ tạm: get (xem), set (ghi tạm), resume (làm tiếp việc cũ), clear (xóa bỏ).',
+        },
+        goal: {
+          type: 'string',
+          description: 'Tên/mục tiêu công việc cần nhớ tạm khi action=set.',
+        },
+        steps: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Danh sách các bước cần làm lại khi action=set.',
+        },
+        note: {
+          type: 'string',
+          description: 'Ghi chú ngắn thêm khi action=set.',
         },
       },
       required: ['action'],
@@ -494,16 +533,42 @@ export function createMcpHandler({
       }
 
       case 'mc_connect': {
-        const port = Number(input.port);
-        if (!Number.isInteger(port) || port < 1 || port > 65535) {
-          throw new Error('Cổng port không hợp lệ (1-65535)');
+        const rawHost = input.host != null ? String(input.host).trim() : '';
+        const hasPort = input.port != null && String(input.port).trim() !== '';
+        if (!hasPort && !rawHost) {
+          throw new Error('Cần truyền port hoặc host (vd: xxxx.e4mc.link)');
+        }
+        const parsedAddr = rawHost ? parseServerAddress(rawHost, { defaultPort: 25565 }) : null;
+        if (rawHost && (!parsedAddr || !parsedAddr.host)) {
+          throw new Error('Host không hợp lệ');
+        }
+        let port;
+        if (hasPort) {
+          port = Number(input.port);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            throw new Error('Cổng port không hợp lệ (1-65535)');
+          }
+          if (parsedAddr?.isE4mc && parsedAddr.explicitPort) {
+            port = parsedAddr.port;
+          }
+        } else {
+          port = parsedAddr.port;
         }
         const body = { port };
-        if (input.host != null && String(input.host).trim()) {
-          body.host = String(input.host).trim();
+        if (parsedAddr?.host) {
+          body.host = parsedAddr.host;
         }
         if (input.owner != null && String(input.owner).trim()) {
           body.owner = String(input.owner).trim();
+        }
+        if (input.version != null && String(input.version).trim()) {
+          body.version = String(input.version).trim();
+        }
+        if (input.auth != null) {
+          const authMode = String(input.auth).trim().toLowerCase();
+          if (authMode === 'offline' || authMode === 'microsoft') {
+            body.auth = authMode;
+          }
         }
         return await requestJson('/api/connect', { method: 'POST', body });
       }
@@ -667,6 +732,18 @@ export function createMcpHandler({
         if (input.count != null) body.count = Number(input.count);
         if (input.force != null) body.force = Boolean(input.force);
         return await requestJson('/api/smelt', { method: 'POST', body });
+      }
+
+      case 'mc_scratchpad': {
+        const action = String(input.action ?? 'get').trim();
+        if (action === 'get') {
+          return await requestJson('/api/scratchpad');
+        }
+        const body = { action };
+        if (input.goal != null) body.goal = String(input.goal).trim();
+        if (Array.isArray(input.steps)) body.steps = input.steps.map(s => String(s ?? '').trim()).filter(Boolean);
+        if (input.note != null) body.note = String(input.note).trim();
+        return await requestJson('/api/scratchpad', { method: 'POST', body });
       }
 
       default:

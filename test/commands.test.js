@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CommandRouter, hasNegationPhrase, normalizeText } from '../src/commands.js';
+import { resolveCandidateNames } from '../src/survival/constants.js';
+import { resolveCraftName } from '../src/crafting_recipes.js';
 
 const router = new CommandRouter();
 
@@ -193,4 +195,53 @@ test('supports emergency ! prefix commands and blocks negated/prohibition phrase
 
   assert.equal(router.route('đứng đây').command.type, 'stay');
   assert.equal(router.route('tắt đánh').command.type, 'combat_off');
+});
+
+test('strips Vietnamese indefinite quantifiers, unit classifiers, and particles cleanly while guarding questions', async () => {
+  assert.deepEqual(router.parse('chặt ít gỗ đi'), { type: 'gather', count: 16, target: 'go', needsCount: true, autoDeliver: true });
+  const woodCandidates = resolveCandidateNames('it go di');
+  assert.ok(woodCandidates.includes('oak_log'));
+  assert.ok(woodCandidates.includes('birch_log'));
+
+  assert.deepEqual(router.parse('chặt 1 ít gỗ nha'), { type: 'gather', count: 16, target: 'go', needsCount: true, autoDeliver: true });
+  assert.deepEqual(router.parse('đào vài cục sắt đi'), { type: 'gather', count: 16, target: 'sat', needsCount: true, autoDeliver: true });
+  assert.deepEqual(router.parse('lấy 16 khối đá cuội coi'), { type: 'gather', count: 16, target: 'da cuoi' });
+  assert.deepEqual(router.parse('chặt cây bạch dương đi'), { type: 'gather', count: 16, target: 'cay bach duong' });
+  assert.deepEqual(resolveCandidateNames('cây bạch dương đi'), ['birch_log', 'birch_wood']);
+  assert.deepEqual(router.parse('chặt cây đước đi'), { type: 'gather', count: 16, target: 'cay duoc' });
+  assert.deepEqual(resolveCandidateNames('cay duoc'), ['mangrove_log', 'mangrove_wood']);
+  assert.deepEqual(router.parse('lấy 10 đuốc đi'), { type: 'gather', count: 10, target: 'duoc' });
+
+  assert.deepEqual(router.parse('làm 1 cái cúp đá đi'), { type: 'craft', count: 1, target: 'cup da' });
+  assert.equal(resolveCraftName('1 cái cúp đá đi'), 'stone_pickaxe');
+  assert.equal(resolveCraftName('cây đuốc'), 'torch');
+
+  const { parseQuantityAnswer } = await import('../src/commands.js');
+  assert.deepEqual(parseQuantityAnswer('10'), { mode: 'number', count: 10 });
+  assert.deepEqual(parseQuantityAnswer('tầm 16 cục'), { mode: 'number', count: 16 });
+  assert.deepEqual(parseQuantityAnswer('lấy hết'), { mode: 'all', count: 'all' });
+
+  assert.equal(router.parse('chặt gỗ không?').type, 'unknown');
+  assert.equal(router.parse('làm sao chế khiên?').type, 'unknown');
+
+  assert.deepEqual(router.parse('chặt in ít gỗ'), { type: 'gather', count: 16, target: 'go', needsCount: true, autoDeliver: true });
+  const inItCandidates = resolveCandidateNames('in it go');
+  assert.ok(inItCandidates.includes('oak_log'));
+  assert.ok(inItCandidates.includes('birch_log'));
+  assert.deepEqual(router.parse('chặt chút ít gỗ'), { type: 'gather', count: 16, target: 'go', needsCount: true, autoDeliver: true });
+  assert.deepEqual(router.parse('đào giúp mình tí xíu sắt'), { type: 'gather', count: 16, target: 'sat', needsCount: true, autoDeliver: true });
+  assert.deepEqual(router.parse('chặt hộ tôi ít gỗ đi'), { type: 'gather', count: 16, target: 'go', needsCount: true, autoDeliver: true });
+  assert.deepEqual(router.parse('kiếm vài ba cục than'), { type: 'gather', count: 16, target: 'than', needsCount: true, autoDeliver: true });
+  assert.deepEqual(router.parseChain('chặt cho tui in ít gỗ'), {
+    type: 'chain',
+    steps: [
+      { type: 'gather', count: 16, target: 'go', needsCount: true, autoDeliver: false },
+      { type: 'give', count: 'all', target: 'go' },
+    ],
+    needsCount: true,
+  });
+
+  assert.deepEqual(router.parse('tự do đi'), { type: 'unknown', raw: 'tự do đi' });
+  assert.deepEqual(router.parse('về nhà'), { type: 'go_home' });
+  assert.deepEqual(router.parse('đây là nhà'), { type: 'set_home' });
 });

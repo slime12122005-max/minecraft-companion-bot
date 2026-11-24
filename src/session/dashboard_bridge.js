@@ -81,6 +81,7 @@ export function createDashboardBridge(ctx) {
     const jevAvailable = Boolean(llm?.isAvailable?.() || llm?.apiKey);
 
     return {
+      sessionId: state.sessionId,
       username: bot.username,
       connected: state.connected,
       aiPaused: Boolean(state.aiPaused),
@@ -90,6 +91,8 @@ export function createDashboardBridge(ctx) {
         host: config.minecraft.host,
         port: config.minecraft.port,
         owner: config.owner,
+        version: bot.version || (config.minecraft.version === false ? 'auto' : config.minecraft.version),
+        worldName: config.minecraft.worldName ?? null,
       },
       health: bot.health ?? 20,
       food: bot.food ?? 20,
@@ -128,8 +131,11 @@ export function createDashboardBridge(ctx) {
       pois: typeof memory?.queryPois === 'function' ? memory.queryPois({ limit: 40 }) : [],
       smeltingJobs: Object.fromEntries(ctx.smelting?.activeJobs ?? []),
       activePlan: state.activePlan ?? null,
+      scratchpad: ctx.scratchpad?.snapshot?.() ?? null,
+      ownerStyle: ctx.companion?.getOwnerPronounStyle?.() ?? null,
       brains: {
         planner: 'Antigravity (MCP)',
+        agentModel: config.companion?.agentModel ?? 'gemini-4-hydrogen-low',
         tacticalSupport: jevAvailable ? `Jev (${llm.model ?? 'jev-latest'})` : 'Local Reflex',
         system1: jevAvailable ? `jev/${llm.model ?? 'jev-latest'}` : 'local-reflex',
         system2: 'antigravity-mcp',
@@ -142,6 +148,7 @@ export function createDashboardBridge(ctx) {
   }
 
   async function onCommand(cmd) {
+    state.lastApiActionAt = Date.now();
     const routed = ctx.router?.route ? ctx.router.route(cmd) : null;
     await ctx.handleCommand(config.owner, cmd, { viaWhisper: false, fromApi: true });
     return {
@@ -268,7 +275,11 @@ export function createDashboardBridge(ctx) {
     };
   }
 
-  function getInbox({ sinceId = 0, limit = 30 } = {}) {
+  function getInbox({ sinceId = 0, limit = 30, source = null } = {}) {
+    state.lastMcpPollAt = Date.now();
+    if (source === 'sidecar') {
+      state.lastSidecarPollAt = Date.now();
+    }
     const inbox = ctx.inboxState ?? { seq: 0, items: [] };
     const rawSince = Number(sinceId);
     const cleanSince = Number.isInteger(rawSince) && rawSince >= 0 ? rawSince : 0;
@@ -288,6 +299,7 @@ export function createDashboardBridge(ctx) {
         return { ...item, role };
       });
     return {
+      sessionId: state.sessionId,
       latestId: inbox.seq ?? 0,
       messages,
     };
@@ -302,6 +314,7 @@ export function createDashboardBridge(ctx) {
     if (!canSend) {
       return { ok: false, status: 409, error: 'Bot chưa kết nối vào server' };
     }
+    state.lastApiActionAt = Date.now();
     if (!instant && ctx.humanizer?.waitTypingDelay) {
       await ctx.humanizer.waitTypingDelay(text, {
         urgent: Boolean(combat?.busy),
@@ -392,7 +405,8 @@ export function createDashboardBridge(ctx) {
     return { ok: false, message: 'Thao tác không hợp lệ' };
   }
 
-  async function onMacro({ macro, wait = true } = {}) {
+  async function onMacro({ macro, wait = true, resumingRecovery = false } = {}) {
+    state.lastApiActionAt = Date.now();
     const name = String(macro ?? '').trim();
     if (!BUILTIN_MACROS[name]) {
       return { ok: false, status: 400, error: `Unknown macro: ${name}` };
@@ -401,9 +415,16 @@ export function createDashboardBridge(ctx) {
       return { ok: false, status: 503, error: 'Macro runner chưa sẵn sàng' };
     }
     ctx.stopCurrentTask?.(`Macro ${name}`);
+    ctx.scratchpad?.startMacro?.({ macro: name, resumingRecovery: Boolean(resumingRecovery) });
     const run = tasks.run(
       { name: `macro_${name}`, reason: `Macro ${name}` },
-      (signal) => ctx.macros.run(name, signal),
+      async (signal) => {
+        const res = await ctx.macros.run(name, signal);
+        if (!signal.aborted && res?.ok) {
+          ctx.scratchpad?.completeActive?.();
+        }
+        return res;
+      },
       { onAbort: () => bot.pathfinder?.setGoal?.(null) }
     );
     if (!run) {
@@ -417,7 +438,8 @@ export function createDashboardBridge(ctx) {
     return { ok: Boolean(res?.ok), macro: name, ...res };
   }
 
-  async function onPlanExecute({ goal = '', steps = [], onDanger = 'pause_and_resume', wait = true } = {}) {
+  async function onPlanExecute({ goal = '', steps = [], onDanger = 'pause_and_resume', wait = true, resumingRecovery = false } = {}) {
+    state.lastApiActionAt = Date.now();
     if (!Array.isArray(steps) || steps.length === 0 || steps.length > 10) {
       return { ok: false, status: 400, error: 'steps must be an array with 1..10 items' };
     }
@@ -434,6 +456,11 @@ export function createDashboardBridge(ctx) {
     const dangerMode = onDanger === 'abort_and_notify' ? 'abort_and_notify' : 'pause_and_resume';
 
     ctx.stopCurrentTask?.(`Kế hoạch Antigravity: ${cleanGoal || planId}`);
+    ctx.scratchpad?.startPlan?.({
+      goal: cleanGoal || planId,
+      steps,
+      resumingRecovery: Boolean(resumingRecovery),
+    });
     const run = tasks.run(
       { name: `plan_${planId}`, reason: cleanGoal || 'Kế hoạch Antigravity' },
       async (signal) => {
@@ -484,6 +511,7 @@ export function createDashboardBridge(ctx) {
                 onOutcome: (t) => notes.push(t),
               });
               completedSteps.push({ step: i, type: 'command', command: cmdText, notes });
+              if (!signal.aborted) ctx.scratchpad?.markPlanStepDone?.(i);
             } else if (step.type === 'macro') {
               const macroRes = await ctx.macros?.run?.(step.macro, signal);
               if (!macroRes?.ok) {
@@ -492,6 +520,7 @@ export function createDashboardBridge(ctx) {
                 return failRes;
               }
               completedSteps.push({ step: i, type: 'macro', macro: step.macro, detail: macroRes });
+              if (!signal.aborted) ctx.scratchpad?.markPlanStepDone?.(i);
             } else if (step.type === 'smelt') {
               if (!ctx.smelting) {
                 const failRes = { ok: false, planId, goal: cleanGoal, failedStep: i, reason: 'SMELTING_UNAVAILABLE', completedSteps };
@@ -507,12 +536,15 @@ export function createDashboardBridge(ctx) {
                 return failRes;
               }
               completedSteps.push({ step: i, type: 'smelt', action: step.action || 'start', detail: smeltRes });
+              if (!signal.aborted) ctx.scratchpad?.markPlanStepDone?.(i);
             } else if (step.type === 'say') {
               const sayRes = await onSay({ message: step.message, whisperTo: step.whisperTo ?? null });
               completedSteps.push({ step: i, type: 'say', detail: sayRes });
+              if (!signal.aborted) ctx.scratchpad?.markPlanStepDone?.(i);
             }
           }
 
+          if (!signal.aborted) ctx.scratchpad?.completeActive?.();
           const doneRes = { ok: true, planId, goal: cleanGoal, completedSteps };
           ctx.pushInbox?.({
             kind: 'plan_completed',
@@ -540,6 +572,7 @@ export function createDashboardBridge(ctx) {
   }
 
   async function onSmelt({ action = 'status', target = '', count = 1, force = false } = {}) {
+    state.lastApiActionAt = Date.now();
     if (!ctx.smelting) {
       return { ok: false, status: 503, error: 'Smelting manager chưa sẵn sàng' };
     }
@@ -563,5 +596,45 @@ export function createDashboardBridge(ctx) {
     return { ok: false, status: 400, error: `Invalid smelt action: ${act}` };
   }
 
-  return { getDashboardState, onCommand, onControl, onInventoryAction, getNearby, getInbox, onSay, onMacro, onPlanExecute, onSmelt };
+  async function onScratchpad({ action = 'get', goal = '', steps = [], note = '' } = {}) {
+    const act = String(action || 'get').trim();
+    if (act === 'get') {
+      return {
+        ok: true,
+        action: 'get',
+        scratchpad: ctx.scratchpad?.snapshot?.() ?? null,
+        summary: ctx.scratchpad?.formatRecoverySummary?.({ ownerName: config.owner }) ?? null,
+      };
+    }
+    state.lastApiActionAt = Date.now();
+    if (act === 'set') {
+      const snap = ctx.scratchpad?.setManualTask?.({ goal, steps, note }) ?? null;
+      return { ok: true, action: 'set', scratchpad: snap };
+    }
+    if (act === 'clear') {
+      const snap = ctx.scratchpad?.clearAll?.() ?? null;
+      return { ok: true, action: 'clear', scratchpad: snap };
+    }
+    if (act === 'resume') {
+      const hadRecovery = Boolean(ctx.scratchpad?.hasRecovery?.());
+      const notes = [];
+      await ctx.dispatchParsedCommand?.(
+        { type: 'scratchpad_resume' },
+        config.owner,
+        (t) => notes.push(t),
+        null,
+        { fromApi: true }
+      );
+      return {
+        ok: true,
+        action: 'resume',
+        resumed: hadRecovery,
+        notes,
+        scratchpad: ctx.scratchpad?.snapshot?.() ?? null,
+      };
+    }
+    return { ok: false, status: 400, error: `Invalid scratchpad action: ${act}` };
+  }
+
+  return { getDashboardState, onCommand, onControl, onInventoryAction, getNearby, getInbox, onSay, onMacro, onPlanExecute, onSmelt, onScratchpad };
 }

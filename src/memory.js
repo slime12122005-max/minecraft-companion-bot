@@ -129,6 +129,22 @@ export class Memory {
     return removed;
   }
 
+  setDurable(key, value) {
+    const res = this.set(key, value);
+    if (this.db && this.dbPath !== ':memory:') {
+      try { this.db.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch {}
+    }
+    return res;
+  }
+
+  deleteDurable(key) {
+    const removed = this.delete(key);
+    if (this.db && this.dbPath !== ':memory:') {
+      try { this.db.exec('PRAGMA wal_checkpoint(PASSIVE);'); } catch {}
+    }
+    return removed;
+  }
+
   upsertPoi({ category, label, dimension = 'overworld', x, y, z, metadata = null }) {
     const db = this._ensureDb();
     const cat = String(category);

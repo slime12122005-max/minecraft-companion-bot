@@ -3,6 +3,61 @@ const { goals } = pf;
 import { hasPickaxeTier, requiredPickTier, PICK_ITEM_BY_TIER, PREP_HINT_BY_TIER } from '../readiness.js';
 import { isTreeLogName, posKey, raceTimeout, resolveCandidateNames, sleep } from './constants.js';
 
+const BLOCK_DROP_EQUIVALENTS = {
+  stone: ['cobblestone'],
+  deepslate: ['cobbled_deepslate'],
+  coal_ore: ['coal'],
+  deepslate_coal_ore: ['coal'],
+  iron_ore: ['raw_iron'],
+  deepslate_iron_ore: ['raw_iron'],
+  gold_ore: ['raw_gold'],
+  deepslate_gold_ore: ['raw_gold'],
+  copper_ore: ['raw_copper'],
+  deepslate_copper_ore: ['raw_copper'],
+  diamond_ore: ['diamond'],
+  deepslate_diamond_ore: ['diamond'],
+  emerald_ore: ['emerald'],
+  deepslate_emerald_ore: ['emerald'],
+  lapis_ore: ['lapis_lazuli'],
+  deepslate_lapis_ore: ['lapis_lazuli'],
+  redstone_ore: ['redstone'],
+  deepslate_redstone_ore: ['redstone'],
+};
+
+/**
+ * Counts items in bot.inventory matching any candidate block name or its dropped item equivalent.
+ */
+export function countMatchingInventoryItems(bot, candidates = [], extraNames = []) {
+  const items = bot?.inventory?.items?.() ?? [];
+  if (items.length === 0) return 0;
+  const matchSet = new Set();
+  for (const raw of [...(candidates ?? []), ...(extraNames ?? [])]) {
+    const n = String(raw ?? '').toLowerCase();
+    if (!n) continue;
+    matchSet.add(n);
+    for (const eq of BLOCK_DROP_EQUIVALENTS[n] ?? []) {
+      matchSet.add(eq);
+    }
+  }
+  let total = 0;
+  for (const item of items) {
+    const name = String(item?.name ?? '').toLowerCase();
+    if (name && matchSet.has(name)) {
+      total += Math.max(0, Number(item.count ?? 1));
+    }
+  }
+  return total;
+}
+
+/**
+ * Counts inventory items matching a natural Vietnamese/English target resource name.
+ */
+export function countTargetItems(ctx, targetText) {
+  const candidates = resolveCandidateNames(targetText);
+  if (candidates.length === 0) return 0;
+  return countMatchingInventoryItems(ctx?.bot, candidates);
+}
+
 const RAW_DROP_NAMES = new Set([
   'raw_iron', 'raw_gold', 'raw_copper', 'coal', 'diamond', 'emerald',
   'redstone', 'lapis_lazuli', 'cobblestone', 'cobbled_deepslate',
@@ -91,9 +146,37 @@ export async function gather(ctx, targetText, count = 16, signal = null, { isPau
   }
 
   const isTreeTarget = candidates.some(isTreeLogName) || matchedNames.some(isTreeLogName);
+  const invBefore = countMatchingInventoryItems(ctx.bot, candidates, matchedNames);
+  let topUpPasses = 0;
   let collected = 0;
   const skipped = new Set();
   let consecutiveUnreachableWeight = 0;
+
+  const verifyGainOrTopUp = async () => {
+    if (ctx.bot.entity?.position && typeof ctx.bot.pathfinder?.goto === 'function') {
+      const botPos = ctx.bot.entity.position;
+      const hasNearbyDrop = Object.values(ctx.bot.entities ?? {}).some(
+        e => e?.position && (e.name === 'item' || e.displayName === 'Item') && Math.hypot(e.position.x - botPos.x, e.position.y - botPos.y, e.position.z - botPos.z) <= 8
+      );
+      if (hasNearbyDrop) {
+        await ctx._collectNearbyItemDrops(botPos, signal, isPaused);
+      }
+    }
+    const invNow = countMatchingInventoryItems(ctx.bot, candidates, matchedNames);
+    const invGained = invNow - invBefore;
+    const inventoryTrackingActive = Boolean(ctx.bot._client) || invNow > invBefore;
+    if (
+      inventoryTrackingActive &&
+      invGained < count &&
+      topUpPasses < 4 &&
+      !isInventoryTrulyFull(ctx.bot, candidates, matchedNames)
+    ) {
+      topUpPasses += 1;
+      collected = Math.max(0, invGained);
+      return true;
+    }
+    return false;
+  };
 
   while (collected < count) {
     if (signal?.aborted) throw new Error('Đã hủy');
@@ -105,7 +188,7 @@ export async function gather(ctx, targetText, count = 16, signal = null, { isPau
     const rawPositions = ctx.bot.findBlocks({
       matching: ids,
       maxDistance: 48,
-      count: Math.min(Math.max((count - collected) * 2, isTreeTarget ? 16 : 0) + skipped.size, 64),
+      count: Math.min(Math.max((count - collected) * 2, isTreeTarget ? 16 : 0) + skipped.size, 256),
     }) ?? [];
 
     const positions = rawPositions.filter(p => !skipped.has(posKey(p)));
@@ -116,6 +199,9 @@ export async function gather(ctx, targetText, count = 16, signal = null, { isPau
       collected += treeRes.collected;
       if (!treeRes.anySuccess && positions.every(p => skipped.has(posKey(p)))) {
         break;
+      }
+      if (collected >= count) {
+        await verifyGainOrTopUp();
       }
       continue;
     }
@@ -194,8 +280,12 @@ export async function gather(ctx, targetText, count = 16, signal = null, { isPau
     }
 
     if (!madeProgress) break;
+    if (collected >= count) {
+      await verifyGainOrTopUp();
+    }
   }
-  return collected;
+  const finalInvGained = countMatchingInventoryItems(ctx.bot, candidates, matchedNames) - invBefore;
+  return (Boolean(ctx.bot._client) || finalInvGained > 0) ? Math.max(0, finalInvGained) : collected;
 }
 
 export async function giveToOwner(ctx, ownerName, targetText, count = 1, signal = null, { isPaused = null } = {}) {
@@ -275,5 +365,8 @@ export async function giveToOwner(ctx, ownerName, targetText, count = 1, signal 
     }
   }
 
+  if (givenCount > 0) {
+    ctx.lastGaveItemAt = Date.now();
+  }
   return { name: givenName, count: givenCount };
 }
