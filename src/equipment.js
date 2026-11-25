@@ -180,7 +180,98 @@ const ALWAYS_JUNK_ITEMS = new Set([
   'diorite',
   'granite',
   'tuff',
+  'kelp',
+  'vine',
+  'lily_pad',
+  'moss_carpet',
+  'hanging_roots',
+  'spore_blossom',
+  'pink_petals',
+  'wildflowers',
+  'leaf_litter',
+  'bush',
+  'cactus_flower',
+  'dandelion',
+  'poppy',
+  'blue_orchid',
+  'allium',
+  'azure_bluet',
+  'red_tulip',
+  'orange_tulip',
+  'white_tulip',
+  'pink_tulip',
+  'oxeye_daisy',
+  'cornflower',
+  'lily_of_the_valley',
+  'sunflower',
+  'lilac',
+  'rose_bush',
+  'peony',
+  'pumpkin_seeds',
+  'melon_seeds',
+  'torchflower_seeds',
+  'pitcher_pod',
+  'spider_eye',
+  'feather',
+  'ink_sac',
+  'glow_ink_sac',
+  'rabbit_hide',
+  'snowball',
+  'egg',
+  'wooden_hoe',
+  'stone_hoe',
 ]);
+
+const EDIBLE_FOOD_ITEMS = new Set([
+  'golden_apple', 'enchanted_golden_apple', 'golden_carrot', 'cooked_beef', 'cooked_porkchop',
+  'cooked_mutton', 'cooked_salmon', 'cooked_chicken', 'cooked_cod', 'cooked_rabbit', 'bread',
+  'baked_potato', 'pumpkin_pie', 'mushroom_stew', 'rabbit_stew', 'beetroot_soup', 'apple',
+  'carrot', 'melon_slice', 'sweet_berries', 'glow_berries', 'cookie', 'beef', 'porkchop',
+  'chicken', 'mutton', 'rabbit', 'cod', 'salmon', 'potato', 'beetroot', 'dried_kelp',
+]);
+
+const PRECIOUS_LOOT_ITEMS = new Set([
+  'diamond', 'emerald', 'netherite_scrap', 'netherite_ingot', 'ancient_debris',
+  'iron_ingot', 'raw_iron', 'iron_ore', 'deepslate_iron_ore',
+  'gold_ingot', 'raw_gold', 'gold_ore', 'deepslate_gold_ore',
+  'coal', 'charcoal', 'coal_ore', 'deepslate_coal_ore',
+  'ender_pearl', 'blaze_rod', 'totem_of_undying', 'elytra', 'enchanted_book',
+]);
+
+const IRON_ALWAYS_PICKUP_ITEMS = new Set([
+  'iron_ingot', 'raw_iron', 'iron_ore', 'deepslate_iron_ore', 'iron_block', 'raw_iron_block',
+]);
+
+const CHEAP_BULK_BLOCKS = new Set([
+  'dirt', 'grass_block', 'coarse_dirt', 'podzol', 'rooted_dirt', 'mud', 'gravel', 'netherrack',
+]);
+
+export function isAlwaysJunkName(name) {
+  const n = String(name ?? '').toLowerCase();
+  if (!n) return false;
+  return ALWAYS_JUNK_ITEMS.has(n) || n.endsWith('_sapling');
+}
+
+export function extractDroppedItemInfo(entity) {
+  if (!entity) return null;
+  let item = null;
+  if (typeof entity.getDroppedItem === 'function') {
+    try { item = entity.getDroppedItem(); } catch {}
+  }
+  if (!item && entity.item && typeof entity.item === 'object') {
+    item = entity.item;
+  }
+  if (!item && entity.itemName) {
+    item = { name: entity.itemName, count: entity.count ?? 1 };
+  }
+  const rawName = item?.name ?? null;
+  if (!rawName) return null;
+  return {
+    name: String(rawName).toLowerCase().replace(/^minecraft:/, ''),
+    count: Math.max(1, Number(item.count ?? 1)),
+    item,
+  };
+}
 
 const ARMOR_UPGRADE_SPECS = [
   { slot: 'torso', suffix: 'chestplate', cost: 8, label: 'áo giáp' },
@@ -190,12 +281,24 @@ const ARMOR_UPGRADE_SPECS = [
 ];
 
 export class EquipmentManager {
-  constructor(bot, config = {}, { log = () => {} } = {}) {
+  constructor(bot, config = {}, { log = () => {}, isTemporarilyNeeded = null } = {}) {
     this.bot = bot;
     this.config = config;
     this.log = log;
+    this.isTemporarilyNeeded = typeof isTemporarilyNeeded === 'function' ? isTemporarilyNeeded : null;
     this.running = false;
     this._maintaining = null;
+    this.lastDiscardAt = 0;
+    this._recentlyDiscardedNames = new Map();
+    this._ignoredEntityIds = new Map();
+    this._ownerDroppedEntityIds = new Map();
+    if (bot && typeof bot === 'object') {
+      bot._equipment = this;
+    }
+  }
+
+  _isProtectedByTask(name) {
+    return Boolean(name && this.isTemporarilyNeeded?.(name));
   }
 
   get inventoryItems() { return this.bot.inventory?.items?.() ?? []; }
@@ -459,8 +562,310 @@ export class EquipmentManager {
   get blockStackLimit() { return Math.max(0, Number(this.config.inventory?.blockStacks ?? 1)); }
   get discardObsolete() { return this.config.inventory?.discardObsolete === true; }
 
-  async discardObsoleteItems({ force = false } = {}) {
-    if (!force && !this.discardObsolete) return [];
+  ignoreDroppedEntity(entityId, { fromOwner = false, ttlMs = 120000, now = Date.now() } = {}) {
+    if (entityId == null) return;
+    const expiresAt = now + Math.max(1000, Number(ttlMs) || 120000);
+    this._ignoredEntityIds.set(entityId, expiresAt);
+    if (fromOwner) {
+      this._ownerDroppedEntityIds.set(entityId, expiresAt);
+    }
+    if (this._ignoredEntityIds.size > 128) {
+      for (const [id, exp] of this._ignoredEntityIds.entries()) {
+        if (exp <= now) this._ignoredEntityIds.delete(id);
+      }
+      for (const [id, exp] of this._ownerDroppedEntityIds.entries()) {
+        if (exp <= now) this._ownerDroppedEntityIds.delete(id);
+      }
+    }
+  }
+
+  evaluateItemNeed(itemOrName, { count = 1, hasChestAvailable = false } = {}) {
+    const itemObj = typeof itemOrName === 'string' ? { name: itemOrName, count } : itemOrName;
+    const name = itemName(itemObj);
+    if (!name) return { action: 'keep', urgentKeep: false, reason: 'unknown' };
+
+    if (this._isProtectedByTask(name)) {
+      return { action: 'keep', urgentKeep: true, reason: 'active_task_needed' };
+    }
+
+    if (isAlwaysJunkName(name)) {
+      return { action: 'drop', urgentKeep: false, reason: 'junk_item' };
+    }
+
+    const items = this.inventoryItems;
+    const countOf = (pred) => items.reduce(
+      (s, i) => (pred(itemName(i)) ? s + Math.max(1, Number(i.count ?? 1)) : s),
+      0
+    );
+    const ownedCount = countOf((n) => n === name);
+    const emptySlots = typeof this.bot.inventory?.emptySlotCount === 'function'
+      ? this.bot.inventory.emptySlotCount()
+      : 10;
+
+    if (IRON_ALWAYS_PICKUP_ITEMS.has(name)) {
+      const hasStackRoom = emptySlots > 0 || items.some(
+        (i) => itemName(i) === name && (i.count ?? 64) < (i.stackSize ?? 64)
+      );
+      if (hasStackRoom) {
+        return { action: 'keep', urgentKeep: true, alwaysPickup: true, reason: 'always_keep_iron' };
+      }
+      return { action: 'keep', urgentKeep: false, skipPickup: true, reason: 'bag_full_iron' };
+    }
+
+    if (name === 'diamond' || name === 'diamond_block') {
+      const maxDiamonds = Math.max(16, Number(this.config.inventory?.maxDiamonds ?? 64));
+      const totalDiamondUnits = countOf((n) => n === 'diamond') + countOf((n) => n === 'diamond_block') * 9;
+      if (totalDiamondUnits >= maxDiamonds) {
+        return {
+          action: hasChestAvailable ? 'store' : 'keep',
+          urgentKeep: false,
+          skipPickup: true,
+          reason: 'enough_diamonds',
+        };
+      }
+      return { action: 'keep', urgentKeep: totalDiamondUnits < 24, reason: 'precious_gem' };
+    }
+
+    // 1. Gear triage: check armor / tools / bow / shield / totem / buckets
+    const armorSlot = slotForArmor(name);
+    if (armorSlot && rank(itemObj) > 0) {
+      const equipped = this._equippedSlot(armorSlot);
+      const pool = [...(equipped ? [equipped] : []), ...items.filter((i) => slotForArmor(itemName(i)) === armorSlot)];
+      if (pool.length === 0) {
+        return { action: 'keep', urgentKeep: true, reason: `fills_empty_armor_${armorSlot}` };
+      }
+      const winner = [...pool].sort((a, b) => itemScore(b) - itemScore(a))[0];
+      if (itemScore(itemObj) > itemScore(winner) + 0.01) {
+        return { action: 'keep', urgentKeep: true, reason: `upgrades_armor_${armorSlot}` };
+      }
+      if (name === 'golden_helmet' && safeDurabilityRatio(itemObj) >= 0.2) {
+        const hasHealthyGold = pool.some((i) => itemName(i) === 'golden_helmet' && safeDurabilityRatio(i) >= 0.2);
+        if (!hasHealthyGold) {
+          return { action: 'keep', urgentKeep: false, reason: 'nether_gold_helmet' };
+        }
+      }
+      if (hasChestAvailable && rank(itemObj) >= MATERIAL_RANK.iron) {
+        return { action: 'store', urgentKeep: false, reason: 'spare_good_armor' };
+      }
+      return { action: 'drop', urgentKeep: false, reason: 'obsolete_armor' };
+    }
+
+    const toolType = ['sword', 'axe', 'pickaxe', 'shovel'].find((t) => name.endsWith(`_${t}`));
+    if (toolType && rank(itemObj) > 0) {
+      const heldMatches = this.bot.heldItem && itemName(this.bot.heldItem).endsWith(`_${toolType}`) ? [this.bot.heldItem] : [];
+      const pool = [...heldMatches, ...items.filter((i) => itemName(i).endsWith(`_${toolType}`))];
+      if (pool.length === 0) {
+        return { action: 'keep', urgentKeep: true, reason: `fills_empty_${toolType}` };
+      }
+      const winner = [...pool].sort((a, b) => itemScore(b) - itemScore(a))[0];
+      if (itemScore(itemObj) > itemScore(winner) + 0.01) {
+        return { action: 'keep', urgentKeep: true, reason: `upgrades_${toolType}` };
+      }
+      if (hasChestAvailable && rank(itemObj) >= MATERIAL_RANK.iron) {
+        return { action: 'store', urgentKeep: false, reason: 'spare_good_tool' };
+      }
+      return { action: 'drop', urgentKeep: false, reason: 'obsolete_tool' };
+    }
+
+    if (name === 'bow' || name === 'shield' || name === 'totem_of_undying' || name === 'water_bucket' || name === 'bucket') {
+      const hasMatch =
+        items.some((i) => itemName(i) === name) ||
+        itemName(this.bot.heldItem) === name ||
+        itemName(this._offHandItem()) === name;
+      if (!hasMatch) {
+        return { action: 'keep', urgentKeep: name !== 'bucket', reason: `needed_${name}` };
+      }
+      if (name === 'totem_of_undying') {
+        return { action: 'keep', urgentKeep: true, reason: 'totem_reserve' };
+      }
+      if (hasChestAvailable && name !== 'bucket') {
+        return { action: 'store', urgentKeep: false, reason: `spare_${name}` };
+      }
+      return { action: name === 'bow' ? 'drop' : (hasChestAvailable ? 'store' : 'drop'), urgentKeep: false, reason: `duplicate_${name}` };
+    }
+
+    // 2. Edible food triage
+    if (EDIBLE_FOOD_ITEMS.has(name)) {
+      const totalFood = countOf((n) => EDIBLE_FOOD_ITEMS.has(n));
+      const keepFoodTarget = Math.max(24, Number(this.config.inventory?.keepFood ?? 16));
+      if (totalFood < keepFoodTarget) {
+        return { action: 'keep', urgentKeep: totalFood < 6, reason: 'needed_food' };
+      }
+      return {
+        action: hasChestAvailable || emptySlots > 6 ? 'store' : 'drop',
+        urgentKeep: false,
+        reason: 'surplus_food',
+      };
+    }
+
+    // 3. Working pocket caps for survival & crafting progression
+    const maxCobble = Math.max(1, Number(this.blockStackLimit || 2)) * 64;
+    let pocketCap = null;
+    if (name.endsWith('_log') || name.endsWith('_stem')) {
+      pocketCap = { cap: 32, total: countOf((n) => n.endsWith('_log') || n.endsWith('_stem')), reason: 'wood_logs' };
+    } else if (name.endsWith('_planks') || name === 'planks') {
+      pocketCap = { cap: 64, total: countOf((n) => n.endsWith('_planks') || n === 'planks'), reason: 'wood_planks' };
+    } else if (name === 'stick') {
+      pocketCap = { cap: 32, total: ownedCount, reason: 'sticks' };
+    } else if (name === 'crafting_table' || name === 'chest' || name === 'barrel') {
+      pocketCap = { cap: 2, total: ownedCount, reason: 'utility_block' };
+    } else if (name === 'furnace' || name === 'smoker' || name === 'blast_furnace') {
+      pocketCap = { cap: 2, total: ownedCount, reason: 'furnace' };
+    } else if (name.endsWith('_bed')) {
+      pocketCap = { cap: 1, total: countOf((n) => n.endsWith('_bed')), reason: 'bed', urgent: true };
+    } else if (name === 'torch' || name === 'arrow') {
+      pocketCap = { cap: 64, total: ownedCount, reason: name };
+    } else if (name === 'coal' || name === 'charcoal') {
+      pocketCap = { cap: 32, total: countOf((n) => n === 'coal' || n === 'charcoal'), reason: 'fuel' };
+    } else if (name === 'emerald') {
+      pocketCap = { cap: 32, total: ownedCount, reason: 'precious_gem', urgent: true };
+    } else if (name === 'gold_ingot' || name === 'raw_gold' || name === 'gold_ore' || name === 'deepslate_gold_ore') {
+      pocketCap = { cap: 32, total: ownedCount, reason: 'gold_progression' };
+    } else if (name === 'ender_pearl' || name === 'blaze_rod') {
+      pocketCap = { cap: 16, total: ownedCount, reason: 'end_progression', urgent: true };
+    } else if (name === 'cobblestone' || name === 'cobbled_deepslate') {
+      if (ownedCount >= maxCobble && !hasChestAvailable) {
+        return { action: 'drop', urgentKeep: false, reason: 'excess_cobblestone_no_chest' };
+      }
+      pocketCap = { cap: maxCobble, total: ownedCount, reason: 'cobblestone' };
+    } else if (CHEAP_BULK_BLOCKS.has(name)) {
+      if (ownedCount >= (name === 'dirt' ? 32 : 64)) {
+        return { action: 'drop', urgentKeep: false, reason: 'excess_cheap_block' };
+      }
+      if (name === 'dirt') {
+        return { action: 'keep', urgentKeep: false, reason: 'scaffold_dirt' };
+      }
+      return {
+        action: hasChestAvailable || emptySlots > 10 ? 'store' : 'drop',
+        urgentKeep: false,
+        reason: 'surplus_bulk_block',
+      };
+    }
+
+    if (pocketCap) {
+      if (pocketCap.total < pocketCap.cap) {
+        return { action: 'keep', urgentKeep: Boolean(pocketCap.urgent && pocketCap.total < 8), reason: pocketCap.reason };
+      }
+      if (hasChestAvailable || PRECIOUS_LOOT_ITEMS.has(name) || emptySlots > 6) {
+        return { action: 'store', urgentKeep: false, reason: `surplus_${pocketCap.reason}` };
+      }
+      return { action: 'drop', urgentKeep: false, reason: `excess_${pocketCap.reason}` };
+    }
+
+    if (PRECIOUS_LOOT_ITEMS.has(name) || hasChestAvailable || emptySlots > 6) {
+      return { action: 'store', urgentKeep: PRECIOUS_LOOT_ITEMS.has(name), reason: 'useful_misc' };
+    }
+    return { action: 'drop', urgentKeep: false, reason: 'low_value_full_bag' };
+  }
+
+  shouldPickupDroppedEntity(entity, { ownerEntity = null, hasChestAvailable = false, now = Date.now() } = {}) {
+    if (!entity?.position) return false;
+    if (now - (this.lastDiscardAt ?? 0) < 4000) return false;
+
+    const info = extractDroppedItemInfo(entity);
+    const ignoreExp = this._ignoredEntityIds.get(entity.id) ?? 0;
+    if (ignoreExp > now) {
+      const ownerExp = this._ownerDroppedEntityIds.get(entity.id) ?? 0;
+      if (ownerExp > now && info) {
+        const evalRes = this.evaluateItemNeed(info.item ?? info.name, { count: info.count, hasChestAvailable });
+        if (evalRes.skipPickup) return false;
+        const hasBothPos = Boolean(ownerEntity?.position && this.bot.entity?.position);
+        const botDist = hasBothPos ? entity.position.distanceTo(this.bot.entity.position) : Infinity;
+        const ownerDist = hasBothPos ? entity.position.distanceTo(ownerEntity.position) : Infinity;
+        if (evalRes.alwaysPickup) {
+          if (hasBothPos && ownerDist < 1.2 && botDist > ownerDist + 0.5) {
+            return false;
+          }
+          return true;
+        }
+        if (hasBothPos && evalRes.urgentKeep && botDist + 0.8 < ownerDist) {
+          return true;
+        }
+        if (hasBothPos && evalRes.action !== 'drop' && botDist <= 2.2 && botDist + 0.9 < ownerDist) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    if (info) {
+      if (!this._isProtectedByTask(info.name) && (this._recentlyDiscardedNames.get(info.name) ?? 0) > now) {
+        return false;
+      }
+      const need = this.evaluateItemNeed(info.item ?? info.name, { count: info.count, hasChestAvailable });
+      if (need.action === 'drop' || need.skipPickup) return false;
+      if (need.action === 'store') {
+        const emptySlots = typeof this.bot.inventory?.emptySlotCount === 'function'
+          ? this.bot.inventory.emptySlotCount()
+          : 10;
+        if (emptySlots <= 6 || (!hasChestAvailable && emptySlots <= 12)) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  async _tossItemAwayFromOwner(item, ownerEntity = null) {
+    const name = itemName(item);
+    const now = Date.now();
+    this.lastDiscardAt = now;
+    if (name) {
+      this._recentlyDiscardedNames.set(name, now + 35000);
+    }
+    if (this.bot.entity?.position && typeof this.bot.look === 'function' && !this.bot.targetDigBlock) {
+      let baseYaw = this.bot.entity.yaw ?? 0;
+      if (ownerEntity?.position) {
+        const dx = this.bot.entity.position.x - ownerEntity.position.x;
+        const dz = this.bot.entity.position.z - ownerEntity.position.z;
+        if (Math.hypot(dx, dz) > 0.2) {
+          baseYaw = Math.atan2(-dx, -dz);
+        }
+      }
+      let chosenYaw = baseYaw;
+      if (typeof this.bot.blockAt === 'function') {
+        const bp = this.bot.entity.position;
+        const hazardRe = /(?:lava|fire|soul_fire|cactus)/;
+        const isSafeAngle = (yaw) => {
+          const sx = -Math.sin(yaw);
+          const sz = -Math.cos(yaw);
+          for (const dist of [1.2, 2.2]) {
+            const x = Math.floor(bp.x + sx * dist);
+            const z = Math.floor(bp.z + sz * dist);
+            for (const dy of [0, -1]) {
+              const blk = this.bot.blockAt({ x, y: Math.floor(bp.y) + dy, z });
+              if (blk && hazardRe.test(String(blk.name ?? '').toLowerCase())) return false;
+            }
+          }
+          return true;
+        };
+        const candidates = [baseYaw, baseYaw + Math.PI / 3, baseYaw - Math.PI / 3, baseYaw + (2 * Math.PI) / 3, baseYaw - (2 * Math.PI) / 3];
+        chosenYaw = candidates.find(isSafeAngle) ?? baseYaw;
+      }
+      const curYaw = this.bot.entity.yaw ?? 0;
+      const diff = Math.abs(Math.atan2(Math.sin(chosenYaw - curYaw), Math.cos(chosenYaw - curYaw)));
+      if (diff > 0.35) {
+        try {
+          await this.bot.look(chosenYaw, 0, true);
+        } catch {}
+      }
+    }
+    if (typeof this.bot.tossStack === 'function') {
+      await this.bot.tossStack(item);
+      return true;
+    }
+    if (typeof this.bot.toss === 'function') {
+      await this.bot.toss(item.type, item.metadata ?? null, item.count);
+      return true;
+    }
+    return false;
+  }
+
+  _collectDiscardPlan({ force = false, blockStacks = null } = {}) {
+    if (!force && !this.discardObsolete) {
+      return { obsolete: [], junk: [] };
+    }
     const items = this.inventoryItems;
 
     const pickWinner = (candidates) => {
@@ -496,22 +901,20 @@ export class EquipmentManager {
       bestToolRank[type] = pool.reduce((m, i) => Math.max(m, rank(i)), 0);
     }
 
-    // Keep 1 healthy golden_helmet for Nether safety.
     const eqHead = this._equippedSlot('head');
     const keptGoldHelmet = (eqHead && itemName(eqHead) === 'golden_helmet' && safeDurabilityRatio(eqHead) >= 0.2)
       ? eqHead
       : pickWinner(items.filter((i) => itemName(i) === 'golden_helmet' && safeDurabilityRatio(i) >= 0.2));
 
-    // Keep at most 1 weaker duplicate bow? Only keep highest-scoring bow.
     const heldBow = this.bot.heldItem && itemName(this.bot.heldItem) === 'bow' ? [this.bot.heldItem] : [];
     const bestBow = pickWinner([...heldBow, ...items.filter((i) => itemName(i) === 'bow')]);
 
-    // Allow keeping at most 1 unenchanted diamond/netherite blank per slot/toolType when an enchanted lower-tier item wins.
     const keptBlankKeys = new Set();
-    const tossed = [];
+    const obsolete = [];
 
     for (const item of items) {
       const name = itemName(item);
+      if (this._isProtectedByTask(name)) continue;
       if (item === keptGoldHelmet) continue;
 
       let isObsolete = false;
@@ -555,30 +958,9 @@ export class EquipmentManager {
         }
       }
 
-      if (!isObsolete) continue;
-
-      try {
-        if (typeof this.bot.tossStack === 'function') {
-          await this.bot.tossStack(item);
-        } else if (typeof this.bot.toss === 'function') {
-          await this.bot.toss(item.type, item.metadata ?? null, item.count);
-        } else {
-          continue;
-        }
-        tossed.push(item.name);
-        this.log(`Discarded obsolete ${item.name}`);
-      } catch (err) {
-        this.log(`Could not discard ${item.name}: ${err.message}`);
-      }
+      if (isObsolete) obsolete.push(item);
     }
-    return tossed;
-  }
 
-  async discardJunkItems({ force = false, blockStacks = null } = {}) {
-    if (!force && !this.discardObsolete) return [];
-    if (typeof this.bot.tossStack !== 'function') return [];
-
-    const items = [...this.inventoryItems];
     const maxCobble = Math.max(1, Number(blockStacks ?? this.blockStackLimit ?? 2)) * 64;
     const bulkLimits = new Map([
       ['cobblestone', maxCobble],
@@ -588,14 +970,21 @@ export class EquipmentManager {
       ['gravel', 64],
     ]);
     const keptCounts = new Map();
-    const tossed = [];
+    const junk = [];
 
     for (const item of items) {
       const name = itemName(item);
       if (!name) continue;
+      if (
+        this._isProtectedByTask(name) ||
+        IRON_ALWAYS_PICKUP_ITEMS.has(name) ||
+        name === 'diamond' ||
+        name === 'diamond_block'
+      ) {
+        continue;
+      }
       const count = Math.max(1, Number(item.count ?? 1));
-
-      let shouldDrop = ALWAYS_JUNK_ITEMS.has(name);
+      let shouldDrop = isAlwaysJunkName(name);
       if (!shouldDrop && bulkLimits.has(name)) {
         const prev = keptCounts.get(name) ?? 0;
         const limit = bulkLimits.get(name);
@@ -605,10 +994,48 @@ export class EquipmentManager {
           keptCounts.set(name, prev + count);
         }
       }
-      if (!shouldDrop) continue;
+      if (shouldDrop) junk.push(item);
+    }
 
+    return { obsolete, junk };
+  }
+
+  hasInventoryTrash({ blockStacks = null } = {}) {
+    if (!this.discardObsolete) return false;
+    const { obsolete, junk } = this._collectDiscardPlan({ force: false, blockStacks });
+    return obsolete.length > 0 || junk.length > 0;
+  }
+
+  async discardObsoleteItems({ force = false, ownerEntity = null } = {}) {
+    if (!force && !this.discardObsolete) return [];
+    const { obsolete } = this._collectDiscardPlan({ force });
+    const tossed = [];
+
+    for (const item of obsolete) {
       try {
-        await this.bot.tossStack(item);
+        const didToss = await this._tossItemAwayFromOwner(item, ownerEntity);
+        if (!didToss) continue;
+        tossed.push(item.name);
+        this.log(`Discarded obsolete ${item.name}`);
+      } catch (err) {
+        this.log(`Could not discard ${item.name}: ${err.message}`);
+      }
+    }
+    return tossed;
+  }
+
+  async discardJunkItems({ force = false, blockStacks = null, ownerEntity = null } = {}) {
+    if (!force && !this.discardObsolete) return [];
+    if (typeof this.bot.tossStack !== 'function' && typeof this.bot.toss !== 'function') return [];
+
+    const { junk } = this._collectDiscardPlan({ force, blockStacks });
+    const tossed = [];
+
+    for (const item of junk) {
+      const name = itemName(item);
+      try {
+        const didToss = await this._tossItemAwayFromOwner(item, ownerEntity);
+        if (!didToss) continue;
         tossed.push(name);
       } catch (error) {
         this.log(`Could not toss junk ${name}: ${error.message}`);
@@ -738,7 +1165,7 @@ export class EquipmentManager {
       return { action: 'craft', item: 'diamond_pickaxe', count: 1, tier: MATERIAL_RANK.diamond, material: 'diamond', reason: 'nâng cấp cúp kim cương' };
     }
 
-    // 6. Smelt raw iron or iron ore if any armor/weapon slot is still below iron.
+    // 6. Smelt raw iron or iron ore if any armor/weapon slot is still below iron AND a furnace is usable/craftable.
     const needsIronGear =
       swordRank < MATERIAL_RANK.iron ||
       pickaxeRank < MATERIAL_RANK.iron ||
@@ -748,7 +1175,14 @@ export class EquipmentManager {
         return bestOwnedRank((n) => slotForArmor(n) === spec.slot, equipped ? [equipped] : []) < MATERIAL_RANK.iron;
       });
     const fuel = countOf((n) => n === 'coal' || n === 'charcoal' || n.endsWith('_planks') || n === 'planks' || n.endsWith('_log'));
-    if (needsIronGear && fuel >= 1) {
+    const hasFurnaceItem = countOf((n) => n === 'furnace' || n === 'blast_furnace') >= 1;
+    const furnaceStone = countOf((n) => n === 'cobblestone' || n === 'cobbled_deepslate' || n === 'blackstone');
+    const furnaceIds = ['furnace', 'blast_furnace'].map((n) => this.bot.registry?.blocksByName?.[n]?.id).filter(Boolean);
+    const hasNearbyFurnace = (!hasFurnaceItem && furnaceStone < 8 && furnaceIds.length > 0 && typeof this.bot.findBlock === 'function')
+      ? Boolean(this.bot.findBlock({ matching: furnaceIds, maxDistance: 16 }))
+      : false;
+    const canFurnace = hasFurnaceItem || furnaceStone >= 8 || hasNearbyFurnace;
+    if (needsIronGear && fuel >= 1 && canFurnace) {
       if (rawIron >= 2) {
         return { action: 'smelt', item: 'iron_ingot', input: 'raw_iron', count: Math.min(rawIron, 16), tier: MATERIAL_RANK.iron, material: 'raw_iron', reason: 'nung sắt thô để rèn đồ sắt' };
       }

@@ -365,6 +365,59 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'mc_open_dev_tab',
+    description: 'Xếp hàng vào 1 tab Orchestrator duy nhất (Gemini 4 Carbon High, chạy lần lượt từng việc, có cooldown và tự xóa khi xong) để thêm JS local hoặc sửa lỗi bot. Gọi action="complete" khi tab Orchestrator làm xong.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['open', 'complete'],
+          description: 'Mặc định open để xếp hàng mở/gửi vào tab Orchestrator duy nhất; đặt complete khi tab Orchestrator đã sửa & test xong việc hiện tại.',
+        },
+        status: {
+          type: 'string',
+          enum: ['passed', 'failed'],
+          description: 'Dùng cùng action="complete" để báo kết quả kiểm tra (passed = tự xóa tab khi hết hàng đợi, failed = giữ tab để xem lỗi).',
+        },
+        kind: {
+          type: 'string',
+          enum: ['add_local_js', 'fix_bug'],
+          description: 'Loại tác vụ dev: add_local_js (thêm xử lý JS local cho câu hỏi/lệnh đơn giản) hoặc fix_bug (sửa lỗi bot).',
+        },
+        title: {
+          type: 'string',
+          minLength: 3,
+          maxLength: 140,
+          description: 'Tiêu đề ngắn gọn cho tác vụ dev.',
+        },
+        summary: {
+          type: 'string',
+          minLength: 5,
+          maxLength: 1200,
+          description: 'Mô tả rõ hành vi cần thêm vào JS, lỗi đang gặp hoặc kết quả hoàn thành.',
+        },
+        userPhrase: {
+          type: 'string',
+          maxLength: 300,
+          description: 'Tùy chọn: câu nói gốc của người chơi dẫn tới ý tưởng/lỗi này.',
+        },
+        errorDetail: {
+          type: 'string',
+          maxLength: 600,
+          description: 'Tùy chọn: chi tiết log lỗi hoặc triệu chứng quan sát được.',
+        },
+        targetFiles: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Tùy chọn: các file nguồn liên quan trong bot/src (vd: ["src/commands.js", "src/companion.js"]).',
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
 ];
 
 function filterInboxMessages(messages = [], { ownerOnly = false, unhandledOnly = false } = {}) {
@@ -744,6 +797,34 @@ export function createMcpHandler({
         if (Array.isArray(input.steps)) body.steps = input.steps.map(s => String(s ?? '').trim()).filter(Boolean);
         if (input.note != null) body.note = String(input.note).trim();
         return await requestJson('/api/scratchpad', { method: 'POST', body });
+      }
+
+      case 'mc_open_dev_tab': {
+        const action = input.action === 'complete' ? 'complete' : 'open';
+        if (action === 'complete') {
+          const body = {
+            action: 'complete',
+            status: input.status === 'failed' ? 'failed' : 'passed',
+            summary: String(input.summary ?? 'completed').trim() || 'completed',
+          };
+          if (input.title != null) body.title = String(input.title).trim();
+          return await requestJson('/api/dev-tab', { method: 'POST', body });
+        }
+        const title = String(input.title ?? '').trim();
+        const summary = String(input.summary ?? '').trim();
+        if (!title || !summary) throw new Error('Thiếu title hoặc summary cho mc_open_dev_tab');
+        const body = {
+          action: 'open',
+          kind: input.kind === 'fix_bug' ? 'fix_bug' : 'add_local_js',
+          title,
+          summary,
+        };
+        if (input.userPhrase != null) body.userPhrase = String(input.userPhrase).trim();
+        if (input.errorDetail != null) body.errorDetail = String(input.errorDetail).trim();
+        if (Array.isArray(input.targetFiles)) {
+          body.targetFiles = input.targetFiles.map(f => String(f ?? '').trim()).filter(Boolean);
+        }
+        return await requestJson('/api/dev-tab', { method: 'POST', body });
       }
 
       default:

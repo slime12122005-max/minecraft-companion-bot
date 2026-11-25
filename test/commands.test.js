@@ -244,4 +244,13 @@ test('strips Vietnamese indefinite quantifiers, unit classifiers, and particles 
   assert.deepEqual(router.parse('tự do đi'), { type: 'unknown', raw: 'tự do đi' });
   assert.deepEqual(router.parse('về nhà'), { type: 'go_home' });
   assert.deepEqual(router.parse('đây là nhà'), { type: 'set_home' });
+
+  // Natural downward excavation phrases & conversational verb-clause guards
+  assert.deepEqual(router.parse('đào thẳng xuống là có đá'), { type: 'gather', count: 16, target: 'da' });
+  assert.deepEqual(router.parse('đào thẳng xuống'), { type: 'gather', count: 16, target: 'da' });
+  assert.deepEqual(router.parse('đào xuống dưới'), { type: 'gather', count: 16, target: 'da' });
+  assert.deepEqual(router.parse('đào thẳng xuống lấy 20 đá'), { type: 'gather', count: 20, target: 'da' });
+  assert.equal(router.parse('đào kiểu gì mới có kim cương').type, 'unknown');
+  assert.equal(router.parse('tìm mãi chẳng thấy sắt').type, 'unknown');
+  assert.equal(router.parse('làm thế thì lâu lắm').type, 'unknown');
 });

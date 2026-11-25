@@ -126,9 +126,13 @@ export async function collectNearbyItemDrops(ctx, centers, signal, isPaused) {
   }
 
   const botPos = ctx.bot.entity.position;
+  const equipMgr = ctx.bot._equipment;
+  const hasChest = Boolean(ctx.home?.getStorageChest?.());
+  const ownerEntity = ctx.config?.owner ? ctx.bot.players?.[ctx.config.owner]?.entity ?? null : null;
   const drops = Object.entries(ctx.bot.entities ?? {})
     .map(([id, e]) => ({ id, entity: e }))
     .filter(({ entity }) => entity?.position && (entity.name === 'item' || entity.displayName === 'Item'))
+    .filter(({ entity }) => !equipMgr?.shouldPickupDroppedEntity || equipMgr.shouldPickupDroppedEntity(entity, { ownerEntity, hasChestAvailable: hasChest }))
     .filter(({ entity }) => anchorList.some(c =>
       Math.hypot(entity.position.x - c.x, entity.position.y - c.y, entity.position.z - c.z) <= 8
     ))

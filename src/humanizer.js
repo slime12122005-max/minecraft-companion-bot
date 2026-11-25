@@ -119,6 +119,7 @@ export class MotorHumanizer {
     signal = null,
   } = {}) {
     if (!targetPos || this.disposed || signal?.aborted) return;
+    if (!urgent && (this.bot?.pathfinder?.isMoving?.() || this.bot?.targetDigBlock)) return;
     const safeTargetPos = !urgent && this.bot?.entity?.position && wouldTriggerEnderman(this.bot, this.bot.entity.position, targetPos)
       ? { x: targetPos.x, y: targetPos.y - 1.8, z: targetPos.z }
       : targetPos;
@@ -149,6 +150,7 @@ export class MotorHumanizer {
 
     for (let i = 1; i <= count; i++) {
       if (this.disposed || signal?.aborted || gen !== this._lookGen) break;
+      if (!urgent && (this.bot?.pathfinder?.isMoving?.() || this.bot?.targetDigBlock)) break;
       const e = smoothStep(i / count);
       try {
         await this.bot.look(startYaw + dYaw * e, startPitch + dPitch * e, false);

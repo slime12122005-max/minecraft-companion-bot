@@ -216,6 +216,31 @@ export function createChatHandler(ctx) {
       }
     }
 
+    if (
+      state.pendingAction &&
+      Date.now() <= (state.pendingAction.expiresAt ?? 0) &&
+      (parsed.type === 'ack' || parsed.type === 'unknown')
+    ) {
+      const confirmNorm = normalizeText(message).replace(/[?!.,~]+$/g, '').trim();
+      if (['ok', 'oke', 'okay', 'u', 'uh', 'uk', 'um', 'dong y', 'cu di', 'van di', 'cu lam', 'cu dao', 'dao luon', 'di luon', 'lam luon'].includes(confirmNorm)) {
+        parsed = { type: 'confirm' };
+      }
+    }
+
+    const lastPollAt = Math.max(state.lastSidecarPollAt ?? 0, state.lastMcpPollAt ?? 0);
+    const mcpActive = !fromApi && lastPollAt > 0 && (Date.now() - lastPollAt) < 15000;
+    if (mcpActive) {
+      if (routed?.tier === 'fuzzy') {
+        logFor('antigravity')(`Nhường câu gần đúng "${message}" sang Antigravity suy luận.`);
+        parsed = { type: 'unknown', raw: message };
+      } else if (
+        parsed.type === 'help' &&
+        !/^(?:!help|!giup|giúp|giup|help|\?)$/i.test(String(message ?? '').trim())
+      ) {
+        parsed = { type: 'unknown', raw: message };
+      }
+    }
+
     const isDirectCommand = parsed.type !== 'unknown' && parsed.type !== 'greet' && parsed.type !== 'ack';
     if (inboxEntry) {
       inboxEntry.parsedType = parsed.type;

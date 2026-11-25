@@ -211,8 +211,13 @@ export function pickupNearbyItem(ctx, { stayPut = false } = {}) {
   }
 
   const pos = ctx.bot.entity.position;
+  const equipMgr = ctx.bot._equipment;
+  if (equipMgr && Date.now() - (equipMgr.lastDiscardAt ?? 0) < 6000) return false;
+  const hasChest = Boolean(ctx.home?.getStorageChest?.());
+  const ownerEntity = ctx.config?.owner ? ctx.bot.players?.[ctx.config.owner]?.entity ?? null : null;
   const dropped = Object.values(ctx.bot.entities ?? {})
     .filter(e => e && e.position && (e.name === 'item' || e.displayName === 'Item'))
+    .filter(e => !equipMgr?.shouldPickupDroppedEntity || equipMgr.shouldPickupDroppedEntity(e, { ownerEntity, hasChestAvailable: hasChest }))
     .map(e => ({ entity: e, dist: pos.distanceTo(e.position) }))
     .filter(x => x.dist <= 4.5 && x.dist > 1)
     .sort((a, b) => a.dist - b.dist)[0];

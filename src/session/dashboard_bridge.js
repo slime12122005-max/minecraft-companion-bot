@@ -1,4 +1,5 @@
 import { getDurabilityRatio } from '../equipment.js';
+import { summarizeReadiness } from '../readiness.js';
 import { BUILTIN_MACROS } from '../skills/macro_runner.js';
 
 const NOTABLE_STATION_BLOCKS = new Set([
@@ -74,8 +75,54 @@ export function createDashboardBridge(ctx) {
     state,
   } = ctx;
 
+  function buildCompactNearbySummary() {
+    const posRaw = bot.entity?.position;
+    if (!posRaw) return null;
+    try {
+      const blockHighlights = new Set();
+      if (typeof bot.findBlocks === 'function' && bot.registry?.blocksByName) {
+        const notableIds = [];
+        for (const [bName, info] of Object.entries(bot.registry.blocksByName)) {
+          if (info?.id && (isNotableBlockName(bName) || bName === 'stone' || bName === 'water')) {
+            notableIds.push(info.id);
+          }
+        }
+        if (notableIds.length > 0) {
+          const hits = bot.findBlocks({ matching: notableIds, maxDistance: 18, count: 32 }) ?? [];
+          for (const hp of hits) {
+            const blk = bot.blockAt?.(hp);
+            if (blk?.name) blockHighlights.add(blk.name);
+            if (blockHighlights.size >= 8) break;
+          }
+        }
+      }
+
+      const mobCounts = new Map();
+      for (const e of Object.values(bot.entities ?? {})) {
+        if (!e?.position || e === bot.entity || e.type === 'player' || e.name === 'item') continue;
+        const d = Math.hypot(e.position.x - posRaw.x, e.position.y - posRaw.y, e.position.z - posRaw.z);
+        if (d > 20 || !e.name) continue;
+        mobCounts.set(e.name, (mobCounts.get(e.name) ?? 0) + 1);
+      }
+
+      const ownerEnt = bot.players?.[config.owner]?.entity ?? null;
+      const ownerDist = ownerEnt?.position
+        ? Math.round(Math.hypot(ownerEnt.position.x - posRaw.x, ownerEnt.position.y - posRaw.y, ownerEnt.position.z - posRaw.z))
+        : null;
+
+      return {
+        ownerDistance: ownerDist,
+        blocks: [...blockHighlights].slice(0, 8),
+        entities: [...mobCounts.entries()].slice(0, 6).map(([name, count]) => `${name}x${count}`),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   function getDashboardState() {
     const slots = bot.inventory?.slots ?? [];
+    const rawItems = bot.inventory?.items?.() ?? [];
     const timeOfDay = bot.time?.timeOfDay ?? null;
     const isDay = bot.time?.isDay ?? (timeOfDay != null ? timeOfDay < 12000 : null);
     const jevAvailable = Boolean(llm?.isAvailable?.() || llm?.apiKey);
@@ -121,13 +168,16 @@ export function createDashboardBridge(ctx) {
       },
       armorMitigation: typeof equipment.armorMitigation === 'function' ? equipment.armorMitigation() : 0,
       lowDurability: typeof equipment.getLowDurabilityItems === 'function' ? equipment.getLowDurabilityItems(0.10) : [],
-      inventory: (bot.inventory?.items?.() ?? []).slice(0, 36).map(i => ({
+      inventory: rawItems.slice(0, 36).map(i => ({
         name: i.name,
         count: i.count,
         slot: i.slot ?? null,
         durabilityRatio: Number(getDurabilityRatio(i).toFixed(3)),
       })),
+      readiness: summarizeReadiness(rawItems, { minFoodPoints: config.survival?.minFoodPoints ?? 20 }),
       chests: home.listChestInventory(),
+      nearbySummary: buildCompactNearbySummary(),
+      recentChat: Array.isArray(ctx.chatHistory) ? ctx.chatHistory.slice(-5) : [],
       pois: typeof memory?.queryPois === 'function' ? memory.queryPois({ limit: 40 }) : [],
       smeltingJobs: Object.fromEntries(ctx.smelting?.activeJobs ?? []),
       activePlan: state.activePlan ?? null,
@@ -636,5 +686,152 @@ export function createDashboardBridge(ctx) {
     return { ok: false, status: 400, error: `Invalid scratchpad action: ${act}` };
   }
 
-  return { getDashboardState, onCommand, onControl, onInventoryAction, getNearby, getInbox, onSay, onMacro, onPlanExecute, onSmelt, onScratchpad };
+  const devBugCooldown = new Map();
+  let pendingDevTaskCount = 0;
+
+  async function onOpenDevTab({
+    action = 'open',
+    status = 'passed',
+    kind = 'add_local_js',
+    title = '',
+    summary = '',
+    userPhrase = '',
+    errorDetail = '',
+    targetFiles = [],
+  } = {}) {
+    if (action === 'complete') {
+      pendingDevTaskCount = Math.max(0, pendingDevTaskCount - 1);
+      const devStatus = status === 'failed' ? 'failed' : 'passed';
+      const cleanSummary = String(summary ?? 'done').trim().slice(0, 600);
+      const shouldSelfDelete = devStatus === 'passed' && pendingDevTaskCount === 0;
+      ctx.pushInbox?.({
+        kind: 'dev_task_done',
+        role: 'SYSTEM',
+        username: bot.username,
+        devStatus,
+        remainingTasks: pendingDevTaskCount,
+        summary: cleanSummary,
+        message: `[Auto-Dev complete: ${devStatus}] ${cleanSummary}`.trim(),
+      });
+      logFor?.('antigravity')?.(
+        `✅ Tab Orchestrator báo xong (${devStatus}, còn ${pendingDevTaskCount} việc${shouldSelfDelete ? ', tự xóa tab' : ''}).`
+      );
+      return {
+        ok: true,
+        completed: true,
+        status: devStatus,
+        remainingTasks: pendingDevTaskCount,
+        shouldSelfDelete,
+      };
+    }
+
+    const cleanKind = kind === 'fix_bug' ? 'fix_bug' : 'add_local_js';
+    const cleanTitle = String(title ?? '').trim().slice(0, 140);
+    const cleanSummary = String(summary ?? '').trim().slice(0, 1200);
+    if (!cleanTitle || !cleanSummary) {
+      return { ok: false, status: 400, error: 'title and summary required' };
+    }
+    const cleanPhrase = String(userPhrase ?? '').trim().slice(0, 300) || null;
+    const cleanError = String(errorDetail ?? '').trim().slice(0, 600) || null;
+    const cleanFiles = Array.isArray(targetFiles)
+      ? targetFiles.slice(0, 8).map(f => String(f ?? '').trim()).filter(Boolean)
+      : [];
+    const signature = `${cleanKind}:${cleanTitle.toLowerCase()}`;
+    const now = Date.now();
+    const prevAt = devBugCooldown.get(signature) ?? 0;
+    if (now - prevAt < 600000) {
+      return { ok: true, queued: false, deduplicated: true, signature };
+    }
+    if (pendingDevTaskCount >= 5) {
+      return { ok: true, queued: false, throttled: true, reason: 'queue_full', signature };
+    }
+    devBugCooldown.set(signature, now);
+    pendingDevTaskCount += 1;
+
+    ctx.pushInbox?.({
+      kind: 'dev_task',
+      devKind: cleanKind,
+      role: 'SYSTEM',
+      username: bot.username,
+      title: cleanTitle,
+      summary: cleanSummary,
+      userPhrase: cleanPhrase,
+      errorDetail: cleanError,
+      targetFiles: cleanFiles,
+      signature,
+      message: `[Auto-Dev ${cleanKind}] ${cleanTitle}: ${cleanSummary}`,
+    });
+    logFor?.('antigravity')?.(`🛠️ Đã xếp hàng vào tab Orchestrator (${cleanKind}): ${cleanTitle}`);
+    return {
+      ok: true,
+      queued: true,
+      devKind: cleanKind,
+      signature,
+      pendingTasks: pendingDevTaskCount,
+      model: config.companion?.devAgentModel ?? 'gemini-4-carbon-high',
+      profile: config.companion?.devAgentProfile ?? 'orchestrator',
+    };
+  }
+
+  function reportRuntimeBug({ source = 'runtime', error = null, context = '' } = {}) {
+    if (config.companion?.autoDevTab === false || ctx.loadPlugins === false) return false;
+    const errMsg = String(error?.message ?? error ?? '').trim();
+    const errName = String(error?.name ?? '').trim();
+    if (!errMsg) return false;
+
+    // Skip expected transient/operational conditions
+    if (
+      /^(?:Đã hủy|Timeout|NoPath|GoalChanged|PathStopped|ECONNREFUSED|ECONNRESET|ETIMEDOUT)/i.test(errMsg) ||
+      /^(?:Timeout|NoPath|GoalChanged|PathStopped)$/i.test(errName) ||
+      /Không có nguyên liệu|Thiếu nguyên liệu|Chưa có công cụ|Không thấy|Không tìm thấy/i.test(errMsg)
+    ) {
+      return false;
+    }
+
+    const isInternalJsBug =
+      source === 'loop' ||
+      ['TypeError', 'ReferenceError', 'RangeError', 'SyntaxError'].includes(errName) ||
+      /Cannot read propert|is not a function|is not defined|Maximum call stack/i.test(errMsg);
+    if (!isInternalJsBug) return false;
+    if (pendingDevTaskCount >= 5) return false;
+
+    const signature = `fix_bug:${source}:${errName}:${errMsg.slice(0, 80).toLowerCase()}`;
+    const now = Date.now();
+    const prevAt = devBugCooldown.get(signature) ?? 0;
+    if (now - prevAt < 900000) return false;
+    devBugCooldown.set(signature, now);
+    pendingDevTaskCount += 1;
+
+    const stackSnippet = String(error?.stack ?? '').split(/\r?\n/).slice(0, 5).join(' | ');
+    ctx.pushInbox?.({
+      kind: 'dev_task',
+      devKind: 'fix_bug',
+      role: 'SYSTEM',
+      username: bot.username,
+      title: `Sửa lỗi runtime ở ${source}: ${errName || 'Error'}`,
+      summary: `Phát hiện lỗi JS trong ${source}${context ? ` (${context})` : ''}: ${errMsg}. Hãy kiểm tra nguyên nhân gốc, sửa code an toàn và thêm unit test.`,
+      errorDetail: stackSnippet || errMsg,
+      targetFiles: ['bot/src'],
+      signature,
+      message: `[Auto-Dev fix_bug] ${source}: ${errMsg}`,
+    });
+    logFor?.('antigravity')?.(`🐛 Tự động gửi lỗi "${errName || 'Error'}" ở ${source} sang tab Orchestrator để sửa.`);
+    return true;
+  }
+
+  return {
+    getDashboardState,
+    onCommand,
+    onControl,
+    onInventoryAction,
+    getNearby,
+    getInbox,
+    onSay,
+    onMacro,
+    onPlanExecute,
+    onSmelt,
+    onScratchpad,
+    onOpenDevTab,
+    reportRuntimeBug,
+  };
 }

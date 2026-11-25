@@ -431,6 +431,7 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
             return;
           }
           const res = await home.takeFromChest(block, parsed.target, parsed.count);
+          if (res?.count > 0) state.lastIntentionalItemGainAt = Date.now();
           if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
           await memory.flush();
           await say(res.count > 0 ? `Đã lấy ${res.count} ${res.name} từ rương.` : `Trong rương không còn ${parsed.target}.`, { kind: 'final' });

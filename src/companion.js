@@ -212,13 +212,22 @@ export function findSafeIdleTreeTarget(bot, { maxDistance = 28, homePos = null, 
 export function findSafeIdleMineralTarget(
   bot,
   candidateNames,
-  { maxDistance = 24, homePos = null, chestPos = null, protectHomeRadius = 0, checkStructureNeighbors = false } = {}
+  {
+    maxDistance = 24,
+    homePos = null,
+    chestPos = null,
+    protectHomeRadius = 0,
+    checkStructureNeighbors = false,
+    requireExposed = true,
+    maxDepthBelowBot = null,
+  } = {}
 ) {
   if (!bot || typeof bot.findBlocks !== 'function' || typeof bot.blockAt !== 'function') return null;
   const blocksByName = bot.registry?.blocksByName ?? {};
   const ids = (candidateNames ?? []).map(n => blocksByName[n]?.id).filter(Boolean);
   if (ids.length === 0) return null;
 
+  const botY = bot.entity?.position?.y;
   const positions = bot.findBlocks({ matching: ids, maxDistance, count: 24 }) ?? [];
   for (const p of positions) {
     if (protectHomeRadius > 0) {
@@ -229,10 +238,26 @@ export function findSafeIdleMineralTarget(
     const px = Math.floor(p.x);
     const py = Math.floor(p.y);
     const pz = Math.floor(p.z);
+    if (maxDepthBelowBot != null && typeof botY === 'number' && (botY - py) > maxDepthBelowBot) {
+      continue;
+    }
+
     let unsafe = false;
+    let hasExposedFace = false;
     for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
       const nb = bot.blockAt(new Vec3(px + dx, py + dy, pz + dz));
       const nName = String(nb?.name ?? '').toLowerCase();
+      if (
+        !nb ||
+        nb.type === 0 ||
+        nName === 'air' ||
+        nName === 'cave_air' ||
+        nName === 'void_air' ||
+        nb.boundingBox === 'empty' ||
+        (Array.isArray(nb.shapes) && nb.shapes.length === 0)
+      ) {
+        hasExposedFace = true;
+      }
       if (!nName) continue;
       if (nName.includes('lava') || nName.includes('water')) {
         unsafe = true;
@@ -243,7 +268,7 @@ export function findSafeIdleMineralTarget(
         break;
       }
     }
-    if (unsafe) continue;
+    if (unsafe || (requireExposed && !hasExposedFace)) continue;
 
     const blk = bot.blockAt(p);
     if (blk && blk.type !== 0) return blk;
@@ -704,38 +729,39 @@ export class CompanionManager {
     }
 
     // 14. Natural-language action extraction
+    const isProhibition = /\b(?:dung|cam|thoi)\b/.test(norm);
     const hasExplicitOneLittle = /\b(?:1 it|mot it|1 chut|mot chut|1 ti|mot ti)\b/.test(norm);
-    if (/\b(?:kiem|chat|don|lay)\b.*\b(?:go|cay|cui)\b/.test(norm)) {
+    if (!isProhibition && /\b(?:kiem|chat|don|lay)\b.*\b(?:go|cay|cui)\b/.test(norm)) {
       if (hasExplicitOneLittle) {
         return { reply: null, command: { type: 'gather', count: 16, target: 'gỗ', needsCount: true, autoDeliver: true } };
       }
       return this._formatActionIntent('gather_wood', pronouns);
     }
-    if (/\b(?:dao|kiem|dap)\b.*\b(?:da|stone|cobble)\b/.test(norm)) {
+    if (!isProhibition && /\b(?:dao|kiem|dap)\b.*\b(?:da|stone|cobble)\b/.test(norm)) {
       if (hasExplicitOneLittle) {
         return { reply: null, command: { type: 'gather', count: 16, target: 'đá', needsCount: true, autoDeliver: true } };
       }
       return this._formatActionIntent('gather_stone', pronouns);
     }
-    if (/\b(?:dao|kiem)\b.*\b(?:than|coal)\b/.test(norm)) {
+    if (!isProhibition && /\b(?:dao|kiem)\b.*\b(?:than|coal)\b/.test(norm)) {
       if (hasExplicitOneLittle) {
         return { reply: null, command: { type: 'gather', count: 16, target: 'than', needsCount: true, autoDeliver: true } };
       }
       return this._formatActionIntent('gather_coal', pronouns);
     }
-    if (/\b(?:dao|kiem)\b.*\b(?:sat|iron)\b/.test(norm)) {
+    if (!isProhibition && /\b(?:dao|kiem)\b.*\b(?:sat|iron)\b/.test(norm)) {
       if (hasExplicitOneLittle) {
         return { reply: null, command: { type: 'gather', count: 8, target: 'sắt', needsCount: true, autoDeliver: true } };
       }
       return this._formatActionIntent('gather_iron', pronouns);
     }
-    if (/\b(?:di cung|bao ve|ho tong|di sat|theo sat)\b/.test(norm)) {
+    if (!isProhibition && /\b(?:di cung|bao ve|ho tong|di sat|theo sat)\b/.test(norm)) {
       return this._formatActionIntent('follow', pronouns);
     }
-    if (/\b(?:qua day|chay lai day|toi cho|den cho|lai cho)\b/.test(norm)) {
+    if (!isProhibition && /\b(?:qua day|chay lai day|toi cho|den cho|lai cho)\b/.test(norm)) {
       return this._formatActionIntent('come', pronouns);
     }
-    if (/\b(?:dung cho|cho ti|doi o day|ngoi yen)\b/.test(norm)) {
+    if (!isProhibition && /\b(?:dung cho|cho ti|doi o day|ngoi yen)\b/.test(norm)) {
       return this._formatActionIntent('stay', pronouns);
     }
 
@@ -784,9 +810,10 @@ export class CompanionManager {
       this._chatTimer = null;
     }
     const { config, state } = this.ctx;
-    const mcpActive = (Date.now() - (state.lastMcpPollAt ?? 0)) < 10000;
+    const lastPollAt = Math.max(state.lastSidecarPollAt ?? 0, state.lastMcpPollAt ?? 0);
+    const mcpActive = lastPollAt > 0 && (Date.now() - lastPollAt) < 15000;
     const delayMs = mcpActive
-      ? (config.companion?.mcpGraceMs ?? 8500)
+      ? (config.companion?.mcpGraceMs ?? 18000)
       : (config.companion?.chatFallbackDelayMs ?? 550);
 
     this._chatTimer = setTimeout(async () => {
@@ -849,7 +876,7 @@ export class CompanionManager {
     if (!bot?.entity?.position || combat?.busy || survival?.busy || tasks?.active || bot.isSleeping || bot.currentWindow || bot.targetDigBlock) {
       return null;
     }
-    if (!force && now - this._lastAutoUpgradeAt < 18000) return null;
+    if (!force && now - this._lastAutoUpgradeAt < 6000) return null;
     if (typeof equipment?.planNextGearUpgrade !== 'function' || !crafting) return null;
 
     const plan = equipment.planNextGearUpgrade();
@@ -862,7 +889,7 @@ export class CompanionManager {
     const runUpgrade = async (signal) => {
       try {
         if (plan.action === 'smelt' && typeof crafting.smeltItem === 'function') {
-          await crafting.smeltItem(plan.item, plan.count ?? 1, signal);
+          await crafting.smeltItem(plan.input ?? plan.item, plan.count ?? 1, signal);
         } else if (typeof crafting.craftItem === 'function') {
           await crafting.craftItem(plan.item, plan.count ?? 1, signal);
         } else {
@@ -884,7 +911,7 @@ export class CompanionManager {
         }
         return true;
       } catch (err) {
-        this._upgradeFailCooldown.set(plan.item, Date.now() + 60000);
+        this._upgradeFailCooldown.set(plan.item, Date.now() + 25000);
         this.ctx.log?.(`Auto-upgrade (${plan.item}) deferred: ${err?.message ?? err}`);
         return false;
       }
@@ -986,7 +1013,7 @@ export class CompanionManager {
       try { home.detectNearbyBase({ radius: 12 }); } catch {}
     }
 
-    if (!force && now - this._lastAutonomyAt < 20000) return null;
+    if (!force && now - this._lastAutonomyAt < 6000) return null;
 
     const items = bot.inventory?.items?.() ?? [];
     const held = bot.heldItem ?? null;
@@ -999,9 +1026,14 @@ export class CompanionManager {
       this._lastAutonomyAt = now;
       const wrapped = async (signal) => {
         try {
-          return await fn(signal);
+          const res = await fn(signal);
+          if (res === false) {
+            const cdMs = (kind === 'auto_store' || kind === 'restock') ? 60000 : 25000;
+            this._autonomyFailCooldown.set(kind, Date.now() + cdMs);
+          }
+          return res;
         } catch (err) {
-          this._autonomyFailCooldown.set(kind, Date.now() + 45000);
+          this._autonomyFailCooldown.set(kind, Date.now() + 25000);
           this.ctx.log?.(`Autonomy (${kind}) deferred: ${err?.message ?? err}`);
           return false;
         }
@@ -1083,23 +1115,31 @@ export class CompanionManager {
       });
     }
 
-    // 4. Cook raw meat / potatoes when fuel is available
+    // 4. Cook raw meat / potatoes when fuel AND a furnace (placed, in inventory, or craftable from >= 8 cobble) are available
     const RAW_COOKABLES = ['beef', 'porkchop', 'mutton', 'chicken', 'rabbit', 'salmon', 'cod', 'potato'];
     const rawStack = items
       .filter((i) => RAW_COOKABLES.includes(String(i?.name ?? '').toLowerCase()))
       .sort((a, b) => (b.count ?? 1) - (a.count ?? 1))[0];
     const hasFuel = countOf((n) => n === 'coal' || n === 'charcoal' || n.endsWith('_planks') || n === 'planks' || n.endsWith('_log')) >= 1;
     if (rawStack && (rawStack.count ?? 1) >= 2 && hasFuel && crafting?.smeltItem) {
-      return await launch('cook_food', 'nau_thuc_an', 'nấu chín thịt/khoai mang theo', async (signal) => {
-        await crafting.smeltItem(rawStack.name, Math.min(rawStack.count ?? 2, 16), signal);
-        return true;
-      });
+      const hasFurnaceItem = allOwned.some((i) => ['furnace', 'smoker'].includes(String(i?.name ?? '').toLowerCase()));
+      const furnaceStoneCount = countOf((n) => n === 'cobblestone' || n === 'blackstone' || n === 'cobbled_deepslate');
+      const furnaceIds = ['furnace', 'smoker'].map((n) => bot.registry?.blocksByName?.[n]?.id).filter(Boolean);
+      const nearbyFurnace = (!hasFurnaceItem && furnaceStoneCount < 8 && furnaceIds.length > 0 && typeof bot.findBlock === 'function')
+        ? bot.findBlock({ matching: furnaceIds, maxDistance: 16 })
+        : null;
+      if (hasFurnaceItem || furnaceStoneCount >= 8 || Boolean(nearbyFurnace)) {
+        return await launch('cook_food', 'nau_thuc_an', 'nấu chín thịt/khoai mang theo', async (signal) => {
+          await crafting.smeltItem(rawStack.name, Math.min(rawStack.count ?? 2, 16), signal);
+          return true;
+        });
+      }
     }
 
-    // 5. Auto-harvest mature crops nearby
+    // 5. Auto-harvest mature crops nearby (without wandering off to break grass unless ordered)
     if (mining?.hasMatureCropsNearby?.(16) && typeof mining.farmCrops === 'function') {
       return await launch('harvest_crops', 'thu_hoach_ruong', 'thu hoạch và gieo lại cây đã chín', async (signal) => {
-        await mining.farmCrops(signal);
+        await mining.farmCrops(signal, { forageSeeds: false });
         return true;
       });
     }
@@ -1180,8 +1220,9 @@ export class CompanionManager {
       } catch {}
     };
 
-    // 8a. Deposit surplus into nearby/home chest when inventory is tight
-    if (emptySlots <= 6 && home?.storeSurplus && typeof bot.openChest === 'function') {
+    // 8a. Purge junk first, then deposit genuinely useful surplus into nearby/home chest
+    const surplusStacks = typeof home?.countSurplusStacks === 'function' ? home.countSurplusStacks() : 0;
+    if ((emptySlots <= 10 || surplusStacks >= 4) && home?.storeSurplus && typeof bot.openChest === 'function') {
       let storeChest = typeof bot.findBlock === 'function'
         ? bot.findBlock({
             matching: (b) => b && (b.name === 'chest' || b.name === 'trapped_chest' || b.name === 'barrel'),
@@ -1198,8 +1239,20 @@ export class CompanionManager {
         }
       }
       if (storeChest?.position) {
-        const storeRes = await launch('auto_store', 'cat_do_tu_dong', 'cất bớt đồ dư vào rương nhà', async () => {
+        const storeRes = await launch('auto_store', 'cat_do_tu_dong', 'lọc rác và cất đồ dư vào rương nhà', async () => {
           announceAutoFarm('cất bớt đồ vô rương');
+          const ownerEnt = bot.players?.[config?.owner]?.entity ?? null;
+          if (equipment?.discardObsoleteItems) {
+            await equipment.discardObsoleteItems({ ownerEntity: ownerEnt });
+          }
+          if (equipment?.discardJunkItems) {
+            await equipment.discardJunkItems({ blockStacks: config?.inventory?.blockStacks ?? 2, ownerEntity: ownerEnt });
+          }
+          const nowEmpty = typeof bot.inventory?.emptySlotCount === 'function' ? bot.inventory.emptySlotCount() : 10;
+          const nowSurplus = typeof home?.countSurplusStacks === 'function' ? home.countSurplusStacks() : 1;
+          if (nowSurplus === 0 && nowEmpty > 10) {
+            return false;
+          }
           if (bot.pathfinder?.goto && bot.entity.position.distanceTo(storeChest.position) > 3.5) {
             await bot.pathfinder.goto(new goals.GoalNear(storeChest.position.x, storeChest.position.y, storeChest.position.z, 2.5));
           }
@@ -1274,18 +1327,103 @@ export class CompanionManager {
         }
       }
 
-      // 8d. Mine natural stone when cobblestone reserve is low
+      // 8d. Mine natural stone when cobblestone reserve is low (prefer exposed, fallback to shallow underground)
       const cobbleCount = countOf((n) => n === 'cobblestone' || n === 'cobbled_deepslate');
       if (pickTier !== 'none' && cobbleCount < 32) {
-        const stoneHit = findSafeIdleMineralTarget(
-          bot,
-          ['stone', 'deepslate'],
-          { maxDistance: Math.min(20, farmDist), homePos, chestPos, protectHomeRadius: 8, checkStructureNeighbors: true }
-        );
+        const stoneOpts = {
+          maxDistance: Math.min(20, farmDist),
+          homePos,
+          chestPos,
+          protectHomeRadius: 8,
+          checkStructureNeighbors: true,
+        };
+        const stoneHit =
+          findSafeIdleMineralTarget(bot, ['stone', 'deepslate'], { ...stoneOpts, requireExposed: true }) ??
+          findSafeIdleMineralTarget(bot, ['stone', 'deepslate'], {
+            ...stoneOpts,
+            maxDistance: Math.min(16, farmDist),
+            requireExposed: false,
+            maxDepthBelowBot: 8,
+          });
         if (stoneHit) {
           const res = await runAutoGather('auto_farm_stone', 'tu_farm_da', 'đào đá tự nhiên dự phòng', 'đào ít đá', stoneHit.name, 12);
           if (res) return res;
         }
+      }
+
+      // 8e. Extended progression: shallow underground ores, deeper wood/stone reserves, and short safe ore prospecting
+      if ((pickTier === 'stone' || pickTier === 'iron' || pickTier === 'diamond') && ironSupply < 24) {
+        const buriedIron = findSafeIdleMineralTarget(
+          bot,
+          ['iron_ore', 'deepslate_iron_ore'],
+          { maxDistance: Math.min(16, oreDist), homePos, chestPos, requireExposed: false, maxDepthBelowBot: 10 }
+        );
+        if (buriedIron) {
+          const res = await runAutoGather('auto_farm_iron_underground', 'tu_farm_sat_ngam', 'đào bậc thang xuống lấy quặng sắt nông', 'đào xuống kiếm sắt', buriedIron.name, 8);
+          if (res) return res;
+        }
+      }
+
+      if (pickTier !== 'none' && coalCount < 24) {
+        const buriedCoal = findSafeIdleMineralTarget(
+          bot,
+          ['coal_ore', 'deepslate_coal_ore'],
+          { maxDistance: Math.min(16, oreDist), homePos, chestPos, requireExposed: false, maxDepthBelowBot: 10 }
+        );
+        if (buriedCoal) {
+          const res = await runAutoGather('auto_farm_coal_underground', 'tu_farm_than_ngam', 'đào bậc thang xuống lấy than nông', 'đào xuống kiếm than', buriedCoal.name, 10);
+          if (res) return res;
+        }
+      }
+
+      if (pickTier !== 'none' && cobbleCount < 64) {
+        const extraStoneOpts = {
+          maxDistance: Math.min(20, farmDist),
+          homePos,
+          chestPos,
+          protectHomeRadius: 8,
+          checkStructureNeighbors: true,
+        };
+        const extraStone =
+          findSafeIdleMineralTarget(bot, ['stone', 'deepslate'], { ...extraStoneOpts, requireExposed: true }) ??
+          findSafeIdleMineralTarget(bot, ['stone', 'deepslate'], {
+            ...extraStoneOpts,
+            maxDistance: Math.min(16, farmDist),
+            requireExposed: false,
+            maxDepthBelowBot: 8,
+          });
+        if (extraStone) {
+          const res = await runAutoGather('auto_farm_stone_stockpile', 'tu_farm_da', 'tích trữ thêm đá cuội', 'đào thêm đá dự trữ', extraStone.name, 16);
+          if (res) return res;
+        }
+      }
+
+      if (logCount < 36 && woodUnits < 144) {
+        const extraTree = findSafeIdleTreeTarget(bot, { maxDistance: farmDist, homePos, chestPos });
+        if (extraTree) {
+          const res = await runAutoGather('auto_farm_wood_stockpile', 'tu_farm_go', 'tích trữ thêm gỗ', 'chặt thêm ít gỗ dự trữ', extraTree.name, 8);
+          if (res) return res;
+        }
+      }
+
+      if (
+        typeof mining?.digTunnel === 'function' &&
+        (pickTier === 'stone' || pickTier === 'iron' || pickTier === 'diamond') &&
+        ironSupply < 16 &&
+        (bot.food ?? 20) >= 14 &&
+        emptySlots > 4 &&
+        (!homePos || Math.hypot(bot.entity.position.x - homePos.x, bot.entity.position.z - homePos.z) > 8)
+      ) {
+        const tunnelRes = await launch('auto_prospect_tunnel', 'tu_do_quang', 'đào hầm ngắn dò quặng sắt/than', async (signal) => {
+          announceAutoFarm('đào hầm ngắn dò quặng');
+          const r = await mining.digTunnel(8, signal);
+          if (!(r?.steps > 0)) {
+            this._autonomyFailCooldown.set('auto_prospect_tunnel', Date.now() + 60000);
+            return false;
+          }
+          return true;
+        }, { autoFarm: true });
+        if (tunnelRes) return tunnelRes;
       }
     }
 
@@ -1353,10 +1491,33 @@ export class CompanionManager {
     const distToOwner = ownerEntity?.position ? bot.entity.position.distanceTo(ownerEntity.position) : null;
     const idleFollowRange = config.companion?.idleFollowRange ?? 6.5;
 
-    // 3. Polite step-back when crowding owner or standing in front of their crosshair
+    // 3. Natural companion escort when owner walks away (release immediately once stopped inside follow range)
+    if (this._escortingOwner && state.idleGoalActive) {
+      if (
+        distToOwner == null ||
+        distToOwner <= 3.8 ||
+        distToOwner > 48 ||
+        (!bot.pathfinder?.isMoving?.() && distToOwner <= idleFollowRange)
+      ) {
+        this.stopIdleMotion();
+      } else {
+        return true;
+      }
+    }
+    if (distToOwner != null && distToOwner > idleFollowRange && distToOwner <= 48) {
+      this._escortingOwner = true;
+      state.idleGoalActive = true;
+      try { bot.pathfinder?.setGoal?.(new goals.GoalFollow(ownerEntity, 3.2), true); } catch {}
+      return true;
+    }
+
+    // 4. Polite step-back when crowding owner or standing in front of their crosshair (only when both are stationary)
+    const ownerMoving = Math.hypot(ownerEntity?.velocity?.x ?? 0, ownerEntity?.velocity?.z ?? 0) > 0.08;
     let inCrosshair = false;
     let sideAngles = null;
     if (
+      !ownerMoving &&
+      !this._escortingOwner &&
       ownerEntity?.position &&
       typeof ownerEntity.yaw === 'number' &&
       Math.abs(bot.entity.position.y - ownerEntity.position.y) <= 2
@@ -1367,7 +1528,7 @@ export class CompanionManager {
       const dz = bot.entity.position.z - ownerEntity.position.z;
       const fwdDot = dx * fx + dz * fz;
       const perpDist = Math.abs(dx * (-fz) + dz * fx);
-      if (fwdDot > 0.3 && fwdDot <= 3.6 && perpDist <= 0.85) {
+      if (fwdDot > 0.3 && fwdDot <= 3.2 && perpDist <= 0.7) {
         inCrosshair = true;
         const t1 = Math.atan2(fx, -fz);
         const t2 = Math.atan2(-fx, fz);
@@ -1375,7 +1536,7 @@ export class CompanionManager {
       }
     }
 
-    if ((inCrosshair || (distToOwner != null && distToOwner < 1.7)) && now - this._lastStepBackAt >= 4000) {
+    if ((inCrosshair || (!this._escortingOwner && distToOwner != null && distToOwner < 1.35)) && now - this._lastStepBackAt >= 6500) {
       this._lastStepBackAt = now;
       this._escortingOwner = false;
       const stepDist = inCrosshair ? Math.max(2.6, Math.min(3.4, (distToOwner ?? 2.6))) : 2.6;
@@ -1388,24 +1549,25 @@ export class CompanionManager {
       }
     }
 
-    // 4. Natural companion escort when owner walks away
-    if (distToOwner != null && distToOwner > idleFollowRange && distToOwner <= 48) {
-      if (!this._escortingOwner || !state.idleGoalActive) {
-        this._escortingOwner = true;
-        state.idleGoalActive = true;
-        try { bot.pathfinder?.setGoal?.(new goals.GoalFollow(ownerEntity, 3.2), true); } catch {}
-      }
-      return true;
-    }
-    if (this._escortingOwner && (distToOwner == null || distToOwner <= 4.0)) {
-      this.stopIdleMotion();
-    }
-
-    // 5. Pick up nearby loose items (skip right after giveToOwner or right under owner's feet)
+    // 5. Pick up nearby loose items (skip while moving, right after giveToOwner/discard, or trash/owner-tossed junk)
     const emptySlots = typeof bot.inventory?.emptySlotCount === 'function' ? bot.inventory.emptySlotCount() : 10;
     const lastGaveAt = survival?.lastGaveItemAt ?? 0;
-    if (now - lastGaveAt >= 8000 && now - this._lastPickupAt >= 5000 && emptySlots > 2) {
+    const lastDiscardAt = equipment?.lastDiscardAt ?? 0;
+    if (
+      !bot.pathfinder?.isMoving?.() &&
+      now - lastGaveAt >= 8000 &&
+      now - lastDiscardAt >= 6000 &&
+      now - this._lastPickupAt >= 5000 &&
+      emptySlots > 2
+    ) {
       const bp = bot.entity.position;
+      const hasChestAvailable = Boolean(
+        this.ctx.home?.getStorageChest?.() ||
+        (typeof bot.findBlock === 'function' && bot.findBlock({
+          matching: (b) => b && (b.name === 'chest' || b.name === 'trapped_chest' || b.name === 'barrel'),
+          maxDistance: 24,
+        }))
+      );
       let bestItem = null;
       let bestDist = Infinity;
       for (const e of Object.values(bot.entities ?? {})) {
@@ -1414,6 +1576,9 @@ export class CompanionManager {
         const d = bp.distanceTo(e.position);
         if (d > 7 || Math.abs(e.position.y - bp.y) > 2) continue;
         if (ownerEntity?.position && e.position.distanceTo(ownerEntity.position) <= 2.2) continue;
+        if (equipment?.shouldPickupDroppedEntity && !equipment.shouldPickupDroppedEntity(e, { ownerEntity, hasChestAvailable, now })) {
+          continue;
+        }
         if (!isSafeIdleSpot(bot, e.position)) continue;
         if (d < bestDist) {
           bestDist = d;
@@ -1437,8 +1602,8 @@ export class CompanionManager {
     const autonomyStarted = await this.tickSurvivalAutonomy(now);
     if (autonomyStarted?.started) return true;
 
-    // 6. Ambient stroll / creature & owner observation
-    if (now >= this._nextWanderAt) {
+    // 6. Ambient stroll / creature & owner observation (never interrupt active idle movement)
+    if (!bot.pathfinder?.isMoving?.() && now >= this._nextWanderAt) {
       const interval = config.companion?.idleWanderIntervalMs ?? 14000;
       this._nextWanderAt = now + interval + Math.floor(Math.random() * 6000);
 

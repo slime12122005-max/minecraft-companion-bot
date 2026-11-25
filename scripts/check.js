@@ -23,7 +23,7 @@ function collectJsFiles(dir, out = []) {
   return out;
 }
 
-const jsFiles = [...collectJsFiles('src'), ...collectJsFiles('test')].sort();
+const jsFiles = [...collectJsFiles('src'), ...collectJsFiles('scripts'), ...collectJsFiles('test')].sort();
 for (const filePath of jsFiles) {
   try {
     execFileSync(process.execPath, ['--check', filePath], { stdio: 'pipe' });

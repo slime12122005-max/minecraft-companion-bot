@@ -253,17 +253,17 @@ export function applyFabricRegistrySync(registry, syncedMap) {
         displayName: fullId,
         hardness: 1.5,
         resistance: 6,
-        minStateId: vanillaMaxStateId,
-        maxStateId: vanillaMaxStateId,
+        minStateId: 0,
+        maxStateId: 0,
         states: [],
         drops: [],
         diggable: false,
-        transparent: false,
-        filterLight: 15,
+        transparent: true,
+        filterLight: 0,
         emitLight: 0,
-        boundingBox: 'block',
+        boundingBox: 'empty',
         material: 'default',
-        shapes: [[0, 0, 0, 1, 1, 1]],
+        shapes: [],
       };
       registry.blocks[rawId] = entry;
       if (registry.blocksByName && !registry.blocksByName[name]) {
@@ -314,11 +314,11 @@ export function applyFabricRegistrySync(registry, syncedMap) {
       states: [],
       drops: [],
       diggable: false,
-      transparent: false,
-      filterLight: 15,
+      transparent: true,
+      filterLight: 0,
       emitLight: 0,
-      boundingBox: 'block',
-      shapes: [[0, 0, 0, 1, 1, 1]],
+      boundingBox: 'empty',
+      shapes: [],
     };
     registry.blocksByStateId = new Proxy(registry.blocksByStateId, {
       get(target, prop, receiver) {

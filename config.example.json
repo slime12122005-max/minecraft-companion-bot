@@ -4,6 +4,7 @@
     "port": 55916,
     "username": "bot_dong_hanh",
     "version": "auto",
+    "auth": "offline",
     "autoDiscoverLan": true
   },
   "owner": "araslime",
@@ -32,7 +33,8 @@
   "inventory": {
     "blockStacks": 2,
     "keepFood": 16,
-    "discardObsolete": true
+    "discardObsolete": true,
+    "maxDiamonds": 64
   },
   "building": {
     "confirmTerrainChange": true,
@@ -72,9 +74,13 @@
   },
   "companion": {
     "agentModel": "gemini-4-hydrogen-low",
+    "devAgentModel": "gemini-4-carbon-high",
+    "devAgentProfile": "orchestrator",
+    "autoDevTab": true,
+    "devGlobalCooldownMs": 180000,
     "naturalChat": true,
     "chatFallbackDelayMs": 550,
-    "mcpGraceMs": 8500,
+    "mcpGraceMs": 18000,
     "idleLife": true,
     "idleFollowRange": 6.5,
     "idleWanderIntervalMs": 14000,

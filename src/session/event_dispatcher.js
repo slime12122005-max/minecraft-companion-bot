@@ -152,7 +152,10 @@ export function bindSessionEvents(ctx) {
           message,
         })
       : null;
-    ctx.handleCommand(username, message, { viaWhisper: false, inboxEntry }).catch(err => errorFor('chat', formatError(err)));
+    ctx.handleCommand(username, message, { viaWhisper: false, inboxEntry }).catch((err) => {
+      errorFor('chat', formatError(err));
+      ctx.reportRuntimeBug?.({ source: 'chat_handler', error: err, context: `chat: ${message}` });
+    });
   };
 
   const onWhisper = (username, message) => {
@@ -168,7 +171,66 @@ export function bindSessionEvents(ctx) {
           message,
         })
       : null;
-    ctx.handleCommand(username, message, { viaWhisper: true, inboxEntry }).catch(err => errorFor('whisper', formatError(err)));
+    ctx.handleCommand(username, message, { viaWhisper: true, inboxEntry }).catch((err) => {
+      errorFor('whisper', formatError(err));
+      ctx.reportRuntimeBug?.({ source: 'whisper_handler', error: err, context: `whisper: ${message}` });
+    });
+  };
+
+  const recentMobDeaths = [];
+  const onEntityDead = (entity) => {
+    if (disposed || !entity?.position || entity.type === 'player' || entity.username) return;
+    const now = Date.now();
+    recentMobDeaths.push({
+      x: entity.position.x,
+      y: entity.position.y,
+      z: entity.position.z,
+      at: now,
+    });
+    if (recentMobDeaths.length > 24) {
+      recentMobDeaths.splice(0, recentMobDeaths.length - 24);
+    }
+  };
+
+  const onEntitySpawn = (entity) => {
+    if (disposed || !entity?.position) return;
+    if (entity.name !== 'item' && entity.displayName !== 'Item' && entity.objectType !== 'Item') return;
+    const now = Date.now();
+    if (
+      now - (equipment.lastDiscardAt ?? 0) < 4000 &&
+      bot.entity?.position &&
+      entity.position.distanceTo(bot.entity.position) <= 4
+    ) {
+      equipment.ignoreDroppedEntity?.(entity.id, { fromOwner: false, now });
+      return;
+    }
+    if (now - lastDigActiveAt >= 1500) {
+      const nearMobDeath = recentMobDeaths.some(
+        (d) => now - d.at <= 1500 && Math.hypot(entity.position.x - d.x, entity.position.y - d.y, entity.position.z - d.z) <= 3.2
+      );
+      if (nearMobDeath) return;
+
+      const ownerEnt = bot.players?.[config.owner]?.entity;
+      if (ownerEnt?.position) {
+        const horiz = Math.hypot(entity.position.x - ownerEnt.position.x, entity.position.z - ownerEnt.position.z);
+        const vert = Math.abs(entity.position.y - ownerEnt.position.y);
+        if (horiz <= 2.6 && vert <= 2.5) {
+          let thrownTowardBot = false;
+          if (bot.entity?.position && entity.velocity) {
+            const dx = bot.entity.position.x - ownerEnt.position.x;
+            const dz = bot.entity.position.z - ownerEnt.position.z;
+            const dLen = Math.hypot(dx, dz);
+            if (dLen > 0.3) {
+              const vDot = ((entity.velocity.x ?? 0) * dx + (entity.velocity.z ?? 0) * dz) / dLen;
+              if (vDot > 0.08) thrownTowardBot = true;
+            }
+          }
+          if (!thrownTowardBot) {
+            equipment.ignoreDroppedEntity?.(entity.id, { fromOwner: true, now });
+          }
+        }
+      }
+    }
   };
 
   bot.once('spawn', onFirstSpawn);
@@ -176,11 +238,16 @@ export function bindSessionEvents(ctx) {
   bot.on('end', onEnd);
   bot.on('death', onDeath);
   bot.on('entitySleep', onEntitySleep);
+  bot.on('entityDead', onEntityDead);
+  bot.on('entitySpawn', onEntitySpawn);
   bot.on('chat', onChat);
   bot.on('whisper', onWhisper);
 
   let combatTicking = false;
   let lastSlowMaintainAt = 0;
+  let lastTrashPurgeAt = 0;
+  let lastDigActiveAt = 0;
+  let stationaryFollowSince = 0;
   let lastDangerAlertAt = 0;
   let jevSurvivalPending = false;
   let lastStuckStageHandled = 0;
@@ -193,11 +260,36 @@ export function bindSessionEvents(ctx) {
     combatTicking = true;
     const now = Date.now();
     try {
+      if (bot.targetDigBlock) {
+        lastDigActiveAt = now;
+      }
       const isStationaryFollow = tasks.active?.task?.name === 'theo_chu' && !bot.pathfinder?.isMoving?.();
+      if (
+        isStationaryFollow &&
+        !combat.busy &&
+        !survival.busy &&
+        ctx.companion?.enabledIdle &&
+        (state.autoFarmEnabled ?? (config?.companion?.autoFarm !== false)) !== false
+      ) {
+        const followOwner = bot.players?.[config.owner]?.entity ?? null;
+        const followDist = followOwner?.position ? bot.entity.position.distanceTo(followOwner.position) : null;
+        if (followDist == null || followDist <= 10) {
+          if (!stationaryFollowSince) {
+            stationaryFollowSince = now;
+          } else if (now - stationaryFollowSince >= 4000) {
+            stationaryFollowSince = 0;
+            ctx.stopCurrentTask('Chủ đứng gần, chuyển sang hộ tống tự động kết hợp tự làm việc');
+          }
+        } else {
+          stationaryFollowSince = 0;
+        }
+      } else {
+        stationaryFollowSince = 0;
+      }
       const wdStatus = watchdog.recordTick(now, {
         pos: bot.entity.position,
         moving: Boolean(bot.pathfinder?.isMoving?.()),
-        digging: Boolean(bot.targetDigBlock),
+        digging: Boolean(bot.targetDigBlock) || (now - lastDigActiveAt < 1800),
         sleeping: Boolean(bot.isSleeping),
         activeTask: Boolean(tasks.active && !tasks.paused && !isStationaryFollow),
         exempt: Boolean(state.aiPaused || combat.busy || survival.busy || bot.currentWindow || combat.shelterHoldPos),
@@ -359,11 +451,20 @@ export function bindSessionEvents(ctx) {
           const emptySlots = typeof bot.inventory?.emptySlotCount === 'function'
             ? bot.inventory.emptySlotCount()
             : 99;
-          if (equipment.discardObsolete && emptySlots <= 3) {
-            await equipment.discardObsoleteItems();
-          }
-          if (equipment.discardObsolete && emptySlots <= 12 && typeof equipment.discardJunkItems === 'function') {
-            await equipment.discardJunkItems({ blockStacks: config.inventory?.blockStacks ?? 2 });
+          const blockStacks = config.inventory?.blockStacks ?? 2;
+          const ownerEntity = bot.players?.[config.owner]?.entity ?? null;
+          const gainGraceOk = now - (state.lastIntentionalItemGainAt ?? 0) >= 8000;
+          const periodicTrash = now - lastTrashPurgeAt >= 4000 && Boolean(equipment.hasInventoryTrash?.({ blockStacks }));
+          const isMovingNow =
+            Boolean(bot.pathfinder?.isMoving?.()) ||
+            Math.hypot(bot.entity?.velocity?.x ?? 0, bot.entity?.velocity?.z ?? 0) > 0.09;
+          const canPurgeNow = (!isMovingNow && !tasks.active) || emptySlots <= 2;
+          if (equipment.discardObsolete && !bot.targetDigBlock && gainGraceOk && canPurgeNow && (emptySlots <= 12 || periodicTrash)) {
+            lastTrashPurgeAt = now;
+            await equipment.discardObsoleteItems({ ownerEntity });
+            if (typeof equipment.discardJunkItems === 'function') {
+              await equipment.discardJunkItems({ blockStacks, ownerEntity });
+            }
           }
         }
         ctx.humanizer?.updateIdleGaze?.(now, {
@@ -378,7 +479,7 @@ export function bindSessionEvents(ctx) {
         const idleFarmOwner = bot.players?.[config.owner]?.entity ?? null;
         if (tasks.active?.task?.autoFarm && idleFarmOwner?.position) {
           const ownerDist = bot.entity.position.distanceTo(idleFarmOwner.position);
-          if (ownerDist > 28 && ownerDist <= 80) {
+          if (ownerDist > 22 && ownerDist <= 80) {
             ctx.stopCurrentTask('Chủ di chuyển xa, tạm dừng tự farm để đi theo');
           }
         }
@@ -465,7 +566,9 @@ export function bindSessionEvents(ctx) {
           });
         }
         if (!combat.busy && !tasks.active) {
-          survival.pickupNearbyItem({ stayPut: state.stayPut });
+          if (!ctx.companion?.enabledIdle && !bot.pathfinder?.isMoving?.()) {
+            survival.pickupNearbyItem({ stayPut: state.stayPut });
+          }
           if (!survival.busy && ctx.smelting?.hasReadyJob?.({ maxDistance: 32 })) {
             const run = tasks.run(
               { name: 'thu_lo_nung' },
@@ -487,6 +590,7 @@ export function bindSessionEvents(ctx) {
       }
     } catch (err) {
       errorFor('loop', err.message);
+      ctx.reportRuntimeBug?.({ source: 'loop', error: err });
     } finally {
       combatTicking = false;
     }
@@ -542,6 +646,8 @@ export function bindSessionEvents(ctx) {
     detach('end', onEnd);
     detach('death', onDeath);
     detach('entitySleep', onEntitySleep);
+    detach('entityDead', onEntityDead);
+    detach('entitySpawn', onEntitySpawn);
     detach('chat', onChat);
     detach('whisper', onWhisper);
     detach('error', onError);

@@ -31,6 +31,7 @@ export class DashboardServer {
     onPlanExecute = null,
     onSmelt = null,
     onScratchpad = null,
+    onOpenDevTab = null,
     sseIntervalMs = 250,
     log = () => {},
   } = {}) {
@@ -49,6 +50,7 @@ export class DashboardServer {
     this.onPlanExecute = onPlanExecute;
     this.onSmelt = onSmelt;
     this.onScratchpad = onScratchpad;
+    this.onOpenDevTab = onOpenDevTab;
     this.sseIntervalMs = Math.max(50, Number(sseIntervalMs) || 250);
     this.log = log;
     this.server = null;
@@ -513,6 +515,41 @@ export class DashboardServer {
             return this._sendJson(res, result.status, {
               ok: false,
               error: result.error ?? 'Scratchpad action failed',
+              ...result,
+            });
+          }
+          this.broadcast();
+          return this._sendJson(res, 200, { ok: true, ...(result && typeof result === 'object' ? result : {}) });
+        } catch (err) {
+          return this._sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+        }
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/dev-tab') {
+        const auth = this._isAuthorizedPost(req, url);
+        if (!auth.ok) return this._sendJson(res, auth.status, { ok: false, error: auth.error });
+        try {
+          const body = await this._readJsonBody(req);
+          const action = body.action === 'complete' ? 'complete' : 'open';
+          const status = body.status === 'failed' ? 'failed' : 'passed';
+          const kind = body.kind === 'fix_bug' ? 'fix_bug' : 'add_local_js';
+          const title = String(body.title ?? '').trim().slice(0, 140);
+          const summary = String(body.summary ?? (action === 'complete' ? 'completed' : '')).trim().slice(0, 1200);
+          const userPhrase = body.userPhrase != null ? String(body.userPhrase).trim().slice(0, 300) : '';
+          const errorDetail = body.errorDetail != null ? String(body.errorDetail).trim().slice(0, 600) : '';
+          const targetFiles = Array.isArray(body.targetFiles)
+            ? body.targetFiles.slice(0, 8).map(f => String(f ?? '').trim()).filter(Boolean)
+            : [];
+          if (action !== 'complete' && (!title || !summary)) {
+            return this._sendJson(res, 400, { ok: false, error: 'title and summary required' });
+          }
+          const result = this.onOpenDevTab
+            ? await this.onOpenDevTab({ action, status, kind, title, summary, userPhrase, errorDetail, targetFiles })
+            : { ok: false, status: 503, error: 'Dev-tab handler chưa sẵn sàng' };
+          if (result?.ok === false && result?.status) {
+            return this._sendJson(res, result.status, {
+              ok: false,
+              error: result.error ?? 'Dev-tab failed',
               ...result,
             });
           }

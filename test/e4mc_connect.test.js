@@ -408,7 +408,7 @@ test('DirectRegistrySync codec round-trips and applyFabricRegistrySync updates i
   assert.equal(reg.blocksByStateId[1]?.name, 'stone');
   const moddedState = reg.blocksByStateId[beforeMaxStateId + 42];
   assert.equal(moddedState?.name, 'modded_block');
-  assert.equal(moddedState?.boundingBox, 'block');
+  assert.equal(moddedState?.boundingBox, 'empty');
   assert.equal(moddedState?.diggable, false);
 });
 

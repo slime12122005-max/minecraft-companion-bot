@@ -527,6 +527,10 @@ export class HomeManager {
     return plan;
   }
 
+  countSurplusStacks() {
+    return this._collectSurplusItems().length;
+  }
+
   async storeSurplus(chestTarget) {
     if (!chestTarget) {
       this.log('Chưa có rương chứa đồ được chỉ định.');

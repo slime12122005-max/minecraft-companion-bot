@@ -1,9 +1,23 @@
 {
   "name": "ban-dong-hanh-minecraft",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Minecraft Java 1.21.1 companion bot: Antigravity MCP main brain, Jev fast support, MotorHumanizer, local reflexes",
+  "description": "Minecraft Java (1.8.8 - 1.21.x+) AI companion bot: Antigravity MCP brain, single-tab Orchestrator auto-dev, Jev tactical support, smart loot & survival autonomy",
+  "homepage": "https://github.com/slime12122005-max/minecraft-companion-bot",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/slime12122005-max/minecraft-companion-bot.git"
+  },
+  "keywords": [
+    "minecraft",
+    "mineflayer",
+    "mcp",
+    "ai-agent",
+    "antigravity",
+    "e4mc",
+    "nodejs"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "doctor": "node src/index.js --doctor",

@@ -26,7 +26,8 @@ echo "========================================================"
 echo "  BOT DONG HANH MINECRAFT - AUTO LAN & AUTO VERSION"
 echo "========================================================"
 echo " - Tu dong do cong Open to LAN & nhan dien phien ban (1.8.8 - 1.21.x+)"
-echo " - Mo san Antigravity Desktop (bat Minecraft Bot Bridge) de chat la bot chay"
+echo " - Mo san Antigravity Desktop (bat Minecraft Bot Bridge - Gemini 4 Hydrogen Low) de chat tu nhien"
+echo " - Co the go cong LAN (vd: 59251) hoac domain e4mc (vd: xxx.e4mc.link) trong terminal"
 echo "========================================================"
 
 exec node src/index.js --auto-lan --no-prompt

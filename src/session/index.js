@@ -27,6 +27,7 @@ import { createDashboardBridge } from './dashboard_bridge.js';
 import { CompanionManager } from '../companion.js';
 import { WorkScratchpad } from '../scratchpad.js';
 import { attachFabricModCompat } from './fabric_compat.js';
+import { resolveCandidateNames } from '../survival/index.js';
 
 export function createBotSession(config, { llm, memory, tasks, router, logger = null, createBotFn = createBot, loadPlugins = true, onConnect = null, externalDashboard = null, inboxState = null, sessionId = null } = {}) {
   const logFor = (tag) => (logger ? logger.scoped(tag) : (...a) => console.log(`[${tag}]`, ...a));
@@ -75,11 +76,28 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     lastMcpPollAt: 0,
     lastSidecarPollAt: 0,
     lastApiActionAt: 0,
+    lastIntentionalItemGainAt: 0,
   };
 
   const stateMachine = new BotStateMachine();
   const watchdog = new HealthWatchdog();
-  const equipment = new EquipmentManager(bot, config, { log: logFor('equipment') });
+  const isTemporarilyNeeded = (itemName) => {
+    const activeTask = tasks?.active?.task;
+    if (!activeTask) return false;
+    const n = String(itemName ?? '').toLowerCase();
+    if (!n) return false;
+    if (activeTask.name === 'lam_ruong' || activeTask.name === 'thu_hoach_ruong') {
+      return n === 'wheat_seeds' || n === 'beetroot_seeds' || n === 'carrot' || n === 'potato' || n === 'wheat' || n === 'beetroot';
+    }
+    if ((activeTask.name === 'lay_tai_nguyen' || activeTask.name === 'kiem_va_dua') && activeTask.target) {
+      if (!activeTask._targetSet) {
+        activeTask._targetSet = new Set(resolveCandidateNames(activeTask.target).map((s) => String(s).toLowerCase()));
+      }
+      return activeTask._targetSet.has(n) || n.includes(String(activeTask.target).toLowerCase());
+    }
+    return false;
+  };
+  const equipment = new EquipmentManager(bot, config, { log: logFor('equipment'), isTemporarilyNeeded });
   const home = new HomeManager(bot, config, { memory, log: logFor('home') });
   const isWorkPaused = () => Boolean(combat.busy || tasks.paused || survival.busy);
   const isWorkInterrupted = () => Boolean(combat.busy || tasks.paused || survival.busy || (Date.now() - state.lastCombatEndedAt < 500));
@@ -228,6 +246,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
 
   const bridge = createDashboardBridge(ctx);
   ctx.dashboardBridge = bridge;
+  ctx.reportRuntimeBug = bridge.reportRuntimeBug;
   const getDashboardState = bridge.getDashboardState;
   const onDashboardCmd = bridge.onCommand;
 
@@ -248,6 +267,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     onPlanExecute: bridge.onPlanExecute,
     onSmelt: bridge.onSmelt,
     onScratchpad: bridge.onScratchpad,
+    onOpenDevTab: bridge.onOpenDevTab,
   });
   ctx.dashboard = dashboard;
 
@@ -263,6 +283,7 @@ export function createBotSession(config, { llm, memory, tasks, router, logger = 
     externalDashboard.onPlanExecute = bridge.onPlanExecute;
     externalDashboard.onSmelt = bridge.onSmelt;
     externalDashboard.onScratchpad = bridge.onScratchpad;
+    externalDashboard.onOpenDevTab = bridge.onOpenDevTab;
     if (onConnect) externalDashboard.onConnect = onConnect;
   } else if (config.dashboard?.enabled && loadPlugins !== false) {
     dashboard.start().catch(err => errorFor('web', err.message));

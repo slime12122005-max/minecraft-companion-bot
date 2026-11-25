@@ -1,5 +1,6 @@
 import pf from 'mineflayer-pathfinder';
 const { goals } = pf;
+import { Vec3 } from 'vec3';
 import { hasPickaxeTier, requiredPickTier, PICK_ITEM_BY_TIER, PREP_HINT_BY_TIER } from '../readiness.js';
 import { isTreeLogName, posKey, raceTimeout, resolveCandidateNames, sleep } from './constants.js';
 
@@ -63,6 +64,19 @@ const RAW_DROP_NAMES = new Set([
   'redstone', 'lapis_lazuli', 'cobblestone', 'cobbled_deepslate',
 ]);
 
+const AIR_NAMES = new Set(['air', 'cave_air', 'void_air']);
+const SOFT_OVERBURDEN_BLOCKS = new Set([
+  'dirt', 'grass_block', 'coarse_dirt', 'podzol', 'rooted_dirt', 'mycelium',
+  'mud', 'farmland', 'sand', 'red_sand', 'gravel', 'clay', 'snow_block', 'moss_block',
+]);
+const FALLING_HAZARD_BLOCKS = new Set(['sand', 'red_sand', 'gravel']);
+const PROTECTED_STRUCTURE_BLOCKS = new Set([
+  'chest', 'trapped_chest', 'barrel', 'furnace', 'blast_furnace', 'smoker',
+  'crafting_table', 'ender_chest', 'enchanting_table', 'anvil', 'chipped_anvil', 'damaged_anvil',
+]);
+const PICKAXE_PRIORITY = ['netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'wooden_pickaxe', 'golden_pickaxe'];
+const SHOVEL_PRIORITY = ['netherite_shovel', 'diamond_shovel', 'iron_shovel', 'stone_shovel', 'wooden_shovel', 'golden_shovel'];
+
 function hasAdjacentLava(bot, blockPos) {
   if (typeof bot?.blockAt !== 'function' || !blockPos) return false;
   for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
@@ -73,6 +87,308 @@ function hasAdjacentLava(bot, blockPos) {
     if (neighbor?.name?.toLowerCase().includes('lava')) return true;
   }
   return false;
+}
+
+function hasAdjacentLiquid(bot, blockPos) {
+  if (typeof bot?.blockAt !== 'function' || !blockPos) return false;
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+    const neighborPos = typeof blockPos.offset === 'function'
+      ? blockPos.offset(dx, dy, dz)
+      : { x: blockPos.x + dx, y: blockPos.y + dy, z: blockPos.z + dz };
+    const neighbor = bot.blockAt(neighborPos);
+    const n = neighbor?.name?.toLowerCase() ?? '';
+    if (n.includes('lava') || n.includes('water')) return true;
+  }
+  return false;
+}
+
+export function hasExposedAirFace(bot, blockPos) {
+  if (typeof bot?.blockAt !== 'function' || !blockPos) return true;
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+    const neighborPos = typeof blockPos.offset === 'function'
+      ? blockPos.offset(dx, dy, dz)
+      : { x: blockPos.x + dx, y: blockPos.y + dy, z: blockPos.z + dz };
+    const nb = bot.blockAt(neighborPos);
+    const n = String(nb?.name ?? '').toLowerCase();
+    if (
+      !nb ||
+      nb.type === 0 ||
+      AIR_NAMES.has(n) ||
+      nb.boundingBox === 'empty' ||
+      (Array.isArray(nb.shapes) && nb.shapes.length === 0)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isSolidDiggableBlock(block) {
+  if (!block || block.type === 0 || block.diggable === false) return false;
+  const n = String(block.name ?? '').toLowerCase();
+  if (!n || AIR_NAMES.has(n) || block.boundingBox === 'empty') return false;
+  if (n === 'bedrock' || n.includes('lava') || n.includes('water')) return false;
+  return true;
+}
+
+function isProtectedExcavationBlock(block, homePos = null) {
+  if (!block) return false;
+  const n = String(block.name ?? '').toLowerCase();
+  if (!n) return false;
+  if (PROTECTED_STRUCTURE_BLOCKS.has(n) || n === 'bed' || n.endsWith('_bed') || n.endsWith('_door')) return true;
+  if (homePos && block.position) {
+    const d = Math.hypot(block.position.x - homePos.x, block.position.z - homePos.z);
+    if (d <= 6 && (n.endsWith('_planks') || n === 'cobblestone' || n.endsWith('_stairs') || n.endsWith('_slab'))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function equipForExcavation(ctx, block, reqTier, signal) {
+  const bot = ctx.bot;
+  const name = String(block?.name ?? '').toLowerCase();
+  const isSoft = SOFT_OVERBURDEN_BLOCKS.has(name);
+  const items = bot.inventory?.items?.() ?? [];
+
+  if (isSoft) {
+    const shovel = SHOVEL_PRIORITY.map(n => items.find(i => i?.name === n)).find(Boolean);
+    if (shovel && typeof bot.equip === 'function') {
+      await bot.equip(shovel, 'hand').catch(() => {});
+      return;
+    }
+    if (bot.heldItem?.name?.endsWith?.('_pickaxe')) {
+      const filler = items.find(i => {
+        const iname = String(i?.name ?? '').toLowerCase();
+        return iname && !iname.endsWith('_pickaxe') && !iname.endsWith('_sword') && !iname.endsWith('_axe');
+      });
+      if (filler && typeof bot.equip === 'function') {
+        await bot.equip(filler, 'hand').catch(() => {});
+      } else if (typeof bot.unequip === 'function') {
+        await bot.unequip('hand').catch(() => {});
+      }
+    }
+    return;
+  }
+
+  if (reqTier && reqTier !== 'none' && typeof bot.inventory?.items === 'function') {
+    if (!hasPickaxeTier(bot.inventory.items() ?? [], reqTier)) {
+      await ctx.ensurePickaxe(reqTier, signal);
+    }
+  }
+
+  const latestItems = bot.inventory?.items?.() ?? [];
+  const pick = PICKAXE_PRIORITY.map(n => latestItems.find(i => i?.name === n)).find(Boolean);
+  if (pick && typeof bot.equip === 'function') {
+    await bot.equip(pick, 'hand').catch(() => {});
+    return;
+  }
+  if (bot.tool?.equipForBlock) {
+    await bot.tool.equipForBlock(block, { requireHarvest: false }).catch(() => {});
+  }
+}
+
+async function excavateStaircaseForStone(ctx, {
+  ids,
+  candidates,
+  matchedNames,
+  reqTier,
+  needed,
+  skipped,
+  signal,
+  isPaused,
+}) {
+  const bot = ctx.bot;
+  const startPos = bot?.entity?.position;
+  if (!startPos || typeof bot?.blockAt !== 'function' || needed <= 0) return 0;
+
+  const homePos = ctx.home?.get?.() ?? null;
+  const startX = Math.floor(startPos.x);
+  const startY = Math.floor(startPos.y);
+  const startZ = Math.floor(startPos.z);
+
+  const cardinals = [
+    { x: 1, z: 0 },
+    { x: -1, z: 0 },
+    { x: 0, z: 1 },
+    { x: 0, z: -1 },
+  ].sort((a, b) => {
+    if (!homePos) return 0;
+    const da = Math.hypot((startX + a.x) - homePos.x, (startZ + a.z) - homePos.z);
+    const db = Math.hypot((startX + b.x) - homePos.x, (startZ + b.z) - homePos.z);
+    return db - da;
+  });
+
+  const isColumnSafe = (px, minY, maxY, pz) => {
+    const floor = bot.blockAt(new Vec3(px, minY - 1, pz));
+    const floorName = String(floor?.name ?? '').toLowerCase();
+    if (!floor || floor.type === 0 || AIR_NAMES.has(floorName) || floor.boundingBox === 'empty') return false;
+    if (floorName.includes('lava') || floorName.includes('water') || floorName === 'magma_block') return false;
+
+    const ceil = bot.blockAt(new Vec3(px, maxY + 1, pz));
+    const ceilName = String(ceil?.name ?? '').toLowerCase();
+    if (FALLING_HAZARD_BLOCKS.has(ceilName) || ceilName.includes('lava') || ceilName.includes('water')) return false;
+
+    for (let yy = minY; yy <= maxY; yy++) {
+      const cell = bot.blockAt(new Vec3(px, yy, pz));
+      if (cell) {
+        const cn = String(cell.name ?? '').toLowerCase();
+        if (cn === 'bedrock' || cn.includes('lava') || cn.includes('water')) return false;
+        if (isProtectedExcavationBlock(cell, homePos)) return false;
+      }
+      if (hasAdjacentLiquid(bot, new Vec3(px, yy, pz))) return false;
+    }
+    return true;
+  };
+
+  let chosenDir = null;
+  for (const dir of cardinals) {
+    if (isColumnSafe(startX + dir.x, startY - 1, startY + 1, startZ + dir.z)) {
+      chosenDir = dir;
+      break;
+    }
+  }
+  if (!chosenDir) return 0;
+
+  let cur = { x: startX, y: startY, z: startZ };
+  let dugTargets = 0;
+
+  const digCellIfSolid = async (p) => {
+    if (signal?.aborted) throw new Error('Đã hủy');
+    while (isPaused?.()) {
+      if (signal?.aborted) throw new Error('Đã hủy');
+      await sleep(200);
+    }
+    if (isInventoryTrulyFull(bot, candidates, matchedNames)) return false;
+
+    const blk = bot.blockAt(p);
+    if (!isSolidDiggableBlock(blk)) return true;
+    if (isProtectedExcavationBlock(blk, homePos) || hasAdjacentLava(bot, p)) return false;
+
+    const above = bot.blockAt(new Vec3(p.x, p.y + 1, p.z));
+    if (above && FALLING_HAZARD_BLOCKS.has(String(above.name ?? '').toLowerCase())) return false;
+
+    const isTarget = ids.includes(blk.type);
+    if (isTarget && reqTier !== 'none' && typeof bot.inventory?.items === 'function') {
+      if (!hasPickaxeTier(bot.inventory.items() ?? [], reqTier)) {
+        const ok = await ctx.ensurePickaxe(reqTier, signal);
+        if (!ok) {
+          if (dugTargets > 0) return false;
+          const reqPick = PICK_ITEM_BY_TIER[reqTier] ?? reqTier;
+          const hint = PREP_HINT_BY_TIER[reqTier];
+          throw new Error(`Chưa có công cụ đủ cấp (cần ${reqPick}).${hint ? ` Gợi ý: ${hint}.` : ''}`);
+        }
+      }
+    }
+
+    await equipForExcavation(ctx, blk, reqTier, signal);
+    const prevType = blk.type;
+    await ctx._digWithTimeout(blk, { signal });
+    const after = bot.blockAt(p);
+    if (after && after.type === prevType) return false;
+    if (isTarget) {
+      dugTargets += 1;
+      skipped?.add(posKey(p));
+    }
+    return true;
+  };
+
+  const stepTo = async (tx, ty, tz) => {
+    if (typeof bot.pathfinder?.goto === 'function') {
+      try {
+        await ctx._gotoWithTimeout(new goals.GoalBlock(tx, ty, tz), {
+          timeoutMs: Math.min(5000, ctx._timeouts.gotoMs),
+          stuckMs: Math.min(2500, ctx._timeouts.stuckMs),
+          signal,
+          isPaused,
+        });
+      } catch (err) {
+        if (signal?.aborted) throw new Error('Đã hủy');
+        return false;
+      }
+      const bp = bot.entity?.position;
+      if (bp && Math.hypot(bp.x - (tx + 0.5), bp.z - (tz + 0.5)) <= 1.8 && Math.abs(bp.y - ty) <= 1.5) {
+        cur = { x: Math.floor(bp.x), y: Math.floor(bp.y), z: Math.floor(bp.z) };
+      } else {
+        cur = { x: tx, y: ty, z: tz };
+      }
+      return true;
+    }
+    cur = { x: tx, y: ty, z: tz };
+    if (bot.entity) bot.entity.position = new Vec3(tx + 0.5, ty, tz + 0.5);
+    return true;
+  };
+
+  const harvestNearbyReachableTargets = async () => {
+    const offsets = [
+      [chosenDir.x, 1, chosenDir.z],
+      [chosenDir.x, 0, chosenDir.z],
+      [-chosenDir.z, 1, chosenDir.x],
+      [-chosenDir.z, 0, chosenDir.x],
+      [chosenDir.z, 1, -chosenDir.x],
+      [chosenDir.z, 0, -chosenDir.x],
+    ];
+    for (const [dx, dy, dz] of offsets) {
+      if (dugTargets >= needed) break;
+      const p = new Vec3(cur.x + dx, cur.y + dy, cur.z + dz);
+      const b = bot.blockAt(p);
+      if (b && ids.includes(b.type)) {
+        await digCellIfSolid(p);
+      }
+    }
+  };
+
+  // Phase 1: Safe 3-high staircase descent through overburden until stone/ore layer is reached
+  let inTargetLayer = false;
+  for (let step = 0; step < 11 && dugTargets < needed; step++) {
+    const nx = cur.x + chosenDir.x;
+    const ny = cur.y - 1;
+    const nz = cur.z + chosenDir.z;
+    if (!isColumnSafe(nx, ny, cur.y + 1, nz)) break;
+
+    for (let yy = cur.y + 1; yy >= ny; yy--) {
+      if (dugTargets >= needed) break;
+      const ok = await digCellIfSolid(new Vec3(nx, yy, nz));
+      if (!ok) return dugTargets;
+    }
+    if (dugTargets >= needed) break;
+
+    const moved = await stepTo(nx, ny, nz);
+    if (!moved) break;
+
+    await harvestNearbyReachableTargets();
+    const frontHeadBlk = bot.blockAt(new Vec3(cur.x + chosenDir.x, cur.y + 1, cur.z + chosenDir.z));
+    if (dugTargets > 0 && frontHeadBlk && ids.includes(frontHeadBlk.type)) {
+      inTargetLayer = true;
+      break;
+    }
+  }
+  if (dugTargets > 0) inTargetLayer = true;
+
+  // Phase 2: Short 2-high horizontal quarry along the stone layer until requested count is gathered
+  for (let h = 0; h < 12 && inTargetLayer && dugTargets < needed; h++) {
+    await harvestNearbyReachableTargets();
+    if (dugTargets >= needed) break;
+
+    const nx = cur.x + chosenDir.x;
+    const ny = cur.y;
+    const nz = cur.z + chosenDir.z;
+    if (!isColumnSafe(nx, ny, ny + 1, nz)) break;
+
+    for (let yy = ny + 1; yy >= ny; yy--) {
+      if (dugTargets >= needed) break;
+      const ok = await digCellIfSolid(new Vec3(nx, yy, nz));
+      if (!ok) return dugTargets;
+    }
+    if (dugTargets >= needed) break;
+    const moved = await stepTo(nx, ny, nz);
+    if (!moved) break;
+  }
+
+  if (dugTargets > 0 && ctx._collectNearbyItemDrops) {
+    await ctx._collectNearbyItemDrops(new Vec3(cur.x + 0.5, cur.y, cur.z + 0.5), signal, isPaused);
+  }
+  return dugTargets;
 }
 
 function isInventoryTrulyFull(bot, candidates, matchedNames) {
@@ -206,8 +522,15 @@ export async function gather(ctx, targetText, count = 16, signal = null, { isPau
       continue;
     }
 
+    const exposedPositions = [];
+    const buriedPositions = [];
+    for (const p of positions) {
+      if (hasExposedAirFace(ctx.bot, p)) exposedPositions.push(p);
+      else buriedPositions.push(p);
+    }
+
     let madeProgress = false;
-    for (const blockPos of positions) {
+    for (const blockPos of exposedPositions) {
       if (signal?.aborted) throw new Error('Đã hủy');
       if (collected >= count) break;
       while (isPaused?.()) {
@@ -276,6 +599,34 @@ export async function gather(ctx, targetText, count = 16, signal = null, { isPau
           throw new Error(`Chưa có công cụ đủ cấp để đào ${targetText}`);
         }
         throw err;
+      }
+    }
+
+    if (
+      !madeProgress &&
+      collected < count &&
+      buriedPositions.length > 0 &&
+      !isInventoryTrulyFull(ctx.bot, candidates, matchedNames)
+    ) {
+      const botY = ctx.bot.entity?.position?.y;
+      const canExcavateDown =
+        candidates.some(c => c === 'stone' || c === 'cobblestone' || c === 'deepslate') ||
+        (typeof botY === 'number' && buriedPositions.some(p => (botY - p.y) >= 1 && (botY - p.y) <= 10));
+      if (canExcavateDown) {
+        const staircaseGot = await excavateStaircaseForStone(ctx, {
+          ids,
+          candidates,
+          matchedNames,
+          reqTier,
+          needed: count - collected,
+          skipped,
+          signal,
+          isPaused,
+        });
+        if (staircaseGot > 0) {
+          collected += staircaseGot;
+          madeProgress = true;
+        }
       }
     }
 

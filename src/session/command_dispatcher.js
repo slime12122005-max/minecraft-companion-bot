@@ -47,10 +47,45 @@ function formatResourceLabel(target) {
 export function createCommandDispatcher(ctx) {
   const { bot, tasks, combat, survival, crafting, mining, state } = ctx;
 
+  function isAntigravityOnline() {
+    const lastPollAt = Math.max(state.lastSidecarPollAt ?? 0, state.lastMcpPollAt ?? 0);
+    return lastPollAt > 0 && (Date.now() - lastPollAt) < 15000;
+  }
+
   async function dispatchParsedCommand(parsed, username, reply, parentSignal = null, chatCtx = null) {
+    let escalatedFailure = false;
+
+    const maybeEscalateFailure = (errorText) => {
+      if (escalatedFailure || chatCtx?.fromApi || parentSignal?.aborted) return false;
+      const skipTypes = new Set(['confirm', 'cancel', 'dashboard_on', 'dashboard_off', 'scratchpad_status', 'scratchpad_clear']);
+      if (skipTypes.has(parsed?.type)) return false;
+      escalatedFailure = true;
+      const userReq = String(chatCtx?.userMessage ?? '').trim();
+      ctx.pushInbox?.({
+        kind: 'alert',
+        alertType: 'task_failed',
+        role: 'SYSTEM',
+        severity: 'high',
+        username,
+        userMessage: userReq || null,
+        commandType: parsed?.type ?? 'unknown',
+        target: parsed?.target ?? null,
+        count: parsed?.count ?? null,
+        error: String(errorText ?? ''),
+        message: `Lệnh "${userReq || parsed?.type}" của ${username} chưa làm ngay được (${errorText}). Hãy tự suy luận và giải quyết bằng mc_plan_execute / mc_command / mc_run_macro / mc_smelt (lấy đồ từ rương, đào nguyên liệu còn thiếu, nung quặng, chế tạo công cụ trung gian) rồi trả lời tự nhiên bằng mc_say.`,
+      });
+      return isAntigravityOnline();
+    };
+
     const say = (text, { kind = 'final' } = {}) => {
       if (!text) return Promise.resolve();
       if (kind === 'start' && chatCtx?.suppressStart) return Promise.resolve();
+      if (kind === 'error') {
+        const delegatedToAnti = maybeEscalateFailure(text);
+        if (delegatedToAnti && !chatCtx?.onOutcome) {
+          return Promise.resolve();
+        }
+      }
       if (chatCtx?.onOutcome) {
         if (kind === 'final' || kind === 'error') {
           chatCtx.onOutcome(text);
@@ -105,6 +140,7 @@ export function createCommandDispatcher(ctx) {
           try {
             const res = await crafting.craftItem(parsed.target, parsed.count, signal);
             done = true;
+            state.lastIntentionalItemGainAt = Date.now();
             if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
             await say(`Đã chế tạo xong ${res.count} ${res.name}.`, { kind: 'final' });
           } finally {
@@ -196,10 +232,14 @@ export function createCommandDispatcher(ctx) {
         say('Đang đi thu hoạch và gieo lại ruộng.', { kind: 'start', isStale: () => done });
         await ctx.runStepTask({ name: 'lam_ruong', reason: 'Lệnh làm ruộng' }, async (signal) => {
           try {
-            const res = await mining.farmCrops(signal);
+            const res = await mining.farmCrops(signal, { forageSeeds: true });
             done = true;
             if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
-            await say(`Đã thu hoạch ${res.harvested} cây, gieo lại ${res.replanted} hạt.`, { kind: 'final' });
+            if ((res.foragedSeeds ?? 0) > 0) {
+              await say(`Đã thu hoạch ${res.harvested} cây, đập cỏ kiếm thêm ${res.foragedSeeds} hạt và gieo lại ${res.replanted} hạt.`, { kind: 'final' });
+            } else {
+              await say(`Đã thu hoạch ${res.harvested} cây, gieo lại ${res.replanted} hạt.`, { kind: 'final' });
+            }
           } finally {
             done = true;
           }
@@ -300,7 +340,10 @@ export function createCommandDispatcher(ctx) {
               }
             }
             if (!signal.aborted && !parentSignal) ctx.scratchpad?.completeActive();
-            await say(got > 0 ? `Đã lấy xong ${got} ${label}.` : `Không tìm thấy ${label} gần đây.`, { kind: 'final' });
+            await say(
+              got > 0 ? `Đã lấy xong ${got} ${label}.` : `Không tìm thấy ${label} gần đây.`,
+              { kind: got > 0 ? 'final' : 'error' }
+            );
           } finally {
             done = true;
           }

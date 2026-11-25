@@ -38,6 +38,7 @@ export const DEFAULT_CONFIG = {
     blockStacks: 2,
     keepFood: 16,
     discardObsolete: false,
+    maxDiamonds: 64,
   },
   building: {
     confirmTerrainChange: true,
@@ -85,9 +86,13 @@ export const DEFAULT_CONFIG = {
   },
   companion: {
     agentModel: 'gemini-4-hydrogen-low',
+    devAgentModel: 'gemini-4-carbon-high',
+    devAgentProfile: 'orchestrator',
+    autoDevTab: true,
+    devGlobalCooldownMs: 180000,
     naturalChat: true,
     chatFallbackDelayMs: 550,
-    mcpGraceMs: 8500,
+    mcpGraceMs: 18000,
     idleLife: false,
     idleFollowRange: 6.5,
     idleWanderIntervalMs: 14000,
@@ -147,6 +152,7 @@ const ConfigSchema = z.object({
     blockStacks: z.number().int().nonnegative(),
     keepFood: z.number().int().nonnegative(),
     discardObsolete: z.boolean(),
+    maxDiamonds: z.number().int().positive().optional(),
   }),
   building: z.object({
     confirmTerrainChange: z.boolean(),
@@ -197,6 +203,10 @@ const ConfigSchema = z.object({
   }).optional(),
   companion: z.object({
     agentModel: z.string().min(1),
+    devAgentModel: z.string().min(1),
+    devAgentProfile: z.string().min(1),
+    autoDevTab: z.boolean(),
+    devGlobalCooldownMs: z.number().int().nonnegative(),
     naturalChat: z.boolean(),
     chatFallbackDelayMs: z.number().int().nonnegative(),
     mcpGraceMs: z.number().int().nonnegative(),

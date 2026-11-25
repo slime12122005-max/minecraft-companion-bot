@@ -20,6 +20,10 @@ export function formatError(err) {
 
 export function configureMovements(bot) {
   const defaultMove = new Movements(bot);
+  defaultMove.allowParkour = false;
+  defaultMove.canOpenDoors = true;
+  defaultMove.dontCreateFlow = true;
+  defaultMove.dontMineUnderFallingBlock = true;
   defaultMove.maxDropDown = 3;
   defaultMove.liquidCost = 4;
   for (const blockName of ['magma_block', 'campfire', 'soul_campfire', 'sweet_berry_bush', 'cactus', 'wither_rose']) {
@@ -27,6 +31,9 @@ export function configureMovements(bot) {
     if (id != null) defaultMove.blocksToAvoid.add(id);
   }
   bot.pathfinder.setMovements(defaultMove);
+  if (bot.collectBlock) {
+    bot.collectBlock.movements = null;
+  }
 }
 
 export function createTaskHelpers(ctx) {

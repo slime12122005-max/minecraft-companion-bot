@@ -227,6 +227,18 @@ export function hasNegationPhrase(rawMessage) {
   return false;
 }
 
+function isPlausibleTargetPhrase(target) {
+  const clean = String(target ?? '').trim();
+  if (!clean) return false;
+  if (clean.split(/\s+/).length > 5) return false;
+  if (
+    /\b(?:la co|thi co|se co|moi co|chang thay|khong thay|cho nao|o dau|the thi|the nay|kieu gi|nhu nao|lam gi|bay gio|ma sao|chu sao|thi lau|thi nhanh|thi duoc|thi sao|ma khong|chu khong)\b/.test(clean)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export class CommandRouter {
   parse(rawMessage) {
     const raw = String(rawMessage ?? '').trim();
@@ -436,13 +448,35 @@ export class CommandRouter {
       /\b(?:lam sao|the nao|cai gi|gi day|o dau|cho nao|tai sao|vi sao|khi nao|bao gio|khong|chua|nhi)\b/.test(norm);
 
     if (!negated && !isQuestionClause) {
+      // Natural downward excavation phrasing (e.g. "đào thẳng xuống là có đá", "đào xuống dưới")
+      const digDownMatch = norm.match(
+        /^dao\s+(?:thang\s+)?xuong(?:\s+(?:duoi|dat|duoi\s+dat|do|day))?(?:\s+(?:la\s+co|thi\s+co|se\s+co|moi\s+co|de\s+lay|de\s+kiem|de\s+tim|lay|kiem|tim))?(?:\s+(.+))?$/
+      );
+      if (digDownMatch) {
+        const tail = (digDownMatch[1] ?? '').trim();
+        if (!tail) {
+          return { type: 'gather', count: 16, target: 'da' };
+        }
+        const parsedTail = parseCountAndTarget(tail, 16);
+        if (parsedTail.target && isPlausibleTargetPhrase(parsedTail.target)) {
+          return {
+            type: 'gather',
+            count: parsedTail.count,
+            target: parsedTail.target,
+            ...(parsedTail.needsCount ? { needsCount: true, autoDeliver: true } : {}),
+          };
+        }
+      }
+
       // Check chest retrieval BEFORE generic "lay "
       for (const prefix of ['lay tu ruong ', 'rut ruong ', 'take ']) {
         if (norm.startsWith(prefix)) {
           const rest = norm.slice(prefix.length).trim();
           if (!rest) break;
           const { count, target, needsCount } = parseCountAndTarget(rest, 1);
-          if (target) return { type: 'take_from_chest', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          if (target && isPlausibleTargetPhrase(target)) {
+            return { type: 'take_from_chest', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          }
         }
       }
 
@@ -451,7 +485,9 @@ export class CommandRouter {
           const rest = norm.slice(prefix.length).trim();
           if (!rest) break;
           const { count, target, needsCount } = parseCountAndTarget(rest, 1);
-          if (target) return { type: 'craft', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          if (target && isPlausibleTargetPhrase(target)) {
+            return { type: 'craft', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          }
         }
       }
 
@@ -460,7 +496,9 @@ export class CommandRouter {
           const rest = norm.slice(prefix.length).trim();
           if (!rest) break;
           const { count, target, needsCount } = parseCountAndTarget(rest, 1);
-          if (target) return { type: 'smelt', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          if (target && isPlausibleTargetPhrase(target)) {
+            return { type: 'smelt', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          }
         }
       }
 
@@ -477,7 +515,7 @@ export class CommandRouter {
           const rest = norm.slice(prefix.length).trim();
           if (!rest) break;
           const { count, target, needsCount } = parseCountAndTarget(rest, 16);
-          if (target) {
+          if (target && isPlausibleTargetPhrase(target)) {
             return {
               type: 'gather',
               count,
@@ -498,7 +536,9 @@ export class CommandRouter {
           const rest = norm.slice(prefix.length).trim();
           if (!rest) break;
           const { count, target, needsCount } = parseCountAndTarget(rest, 1, { allowAll: true });
-          if (target) return { type: 'give', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          if (target && isPlausibleTargetPhrase(target)) {
+            return { type: 'give', count, target, ...(needsCount ? { needsCount: true } : {}) };
+          }
         }
       }
     }

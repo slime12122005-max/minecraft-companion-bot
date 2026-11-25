@@ -306,16 +306,16 @@ export class MiningFarmingManager {
     return Number(props.age) >= maxAge;
   }
 
-  async farmCrops(signal = null) {
+  async farmCrops(signal = null, { forageSeeds = true } = {}) {
     if (typeof this.bot.findBlocks !== 'function' || typeof this.bot.dig !== 'function') {
       throw new Error('Bot chưa sẵn sàng làm ruộng.');
     }
 
     const blocksByName = this.bot.registry?.blocksByName ?? {};
     const cropIds = Object.keys(CROP_MATURE_AGE).map(n => blocksByName[n]?.id).filter(Boolean);
-    if (cropIds.length === 0) return { harvested: 0, replanted: 0 };
-
-    const positions = this.bot.findBlocks({ matching: cropIds, maxDistance: 24, count: 64 }) ?? [];
+    const positions = cropIds.length > 0
+      ? (this.bot.findBlocks({ matching: cropIds, maxDistance: 24, count: 64 }) ?? [])
+      : [];
     let harvested = 0;
     let replanted = 0;
 
@@ -381,6 +381,107 @@ export class MiningFarmingManager {
       }
     }
 
+    const PLANTABLE_ITEMS = ['wheat_seeds', 'carrot', 'potato', 'beetroot_seeds'];
+    const countPlantableSeeds = () => (this.bot.inventory?.items?.() ?? []).reduce(
+      (sum, item) => (PLANTABLE_ITEMS.includes(item?.name) ? sum + Math.max(1, Number(item.count ?? 1)) : sum),
+      0
+    );
+
+    const farmlandId = blocksByName.farmland?.id;
+    const emptyFarmland = [];
+    if (farmlandId) {
+      const farmPositions = this.bot.findBlocks({ matching: [farmlandId], maxDistance: 20, count: 48 }) ?? [];
+      for (const fp of farmPositions) {
+        const abovePos = fp.offset ? fp.offset(0, 1, 0) : new Vec3(fp.x, fp.y + 1, fp.z);
+        const above = this.bot.blockAt?.(abovePos);
+        if (!above || isAirBlock(above)) {
+          emptyFarmland.push(fp);
+        }
+      }
+    }
+
+    let foragedSeeds = 0;
+    if (emptyFarmland.length > 0 && forageSeeds !== false) {
+      const seedsBeforeForage = countPlantableSeeds();
+      const missingSeeds = emptyFarmland.length - seedsBeforeForage;
+      if (missingSeeds > 0) {
+        const GRASS_NAMES = ['short_grass', 'grass', 'tall_grass', 'fern', 'large_fern'];
+        const grassIds = GRASS_NAMES.map((n) => blocksByName[n]?.id).filter(Boolean);
+        if (grassIds.length > 0) {
+          const grassPositions = this.bot.findBlocks({
+            matching: grassIds,
+            maxDistance: 24,
+            count: Math.min(missingSeeds * 4, 20),
+          }) ?? [];
+          for (const gp of grassPositions) {
+            if (countPlantableSeeds() >= emptyFarmland.length) break;
+            if (signal?.aborted) throw new Error('Đã hủy');
+            while (this.isPaused?.()) {
+              if (signal?.aborted) throw new Error('Đã hủy');
+              await sleep(200);
+            }
+            const gBlock = this.bot.blockAt?.(gp);
+            if (!gBlock || !GRASS_NAMES.includes(gBlock.name)) continue;
+            if (this.bot.entity?.position && this.bot.entity.position.distanceTo(gp) > 3.5) {
+              await this._gotoSafe(new goals.GoalNear(gp.x, gp.y, gp.z, 2), signal);
+            }
+            await this._digSafe(gBlock, signal);
+            if (this.seedWaitMs > 0) {
+              await sleep(Math.min(this.seedWaitMs, 200));
+              if (signal?.aborted) throw new Error('Đã hủy');
+            }
+            if (this.bot.pathfinder?.goto && this.bot.entity?.position) {
+              const drop = Object.values(this.bot.entities ?? {})
+                .filter((e) => e?.position && (e.name === 'item' || e.displayName === 'Item'))
+                .map((e) => ({
+                  pos: e.position,
+                  dist: Math.hypot(e.position.x - gp.x, e.position.y - gp.y, e.position.z - gp.z),
+                }))
+                .filter((x) => x.dist <= 3.5)
+                .sort((a, b) => a.dist - b.dist)[0];
+              if (drop) {
+                try {
+                  await this._gotoSafe(new goals.GoalNear(drop.pos.x, drop.pos.y, drop.pos.z, 0.8), signal);
+                } catch (err) {
+                  if (signal?.aborted) throw err;
+                }
+              }
+            }
+          }
+        }
+      }
+      foragedSeeds = Math.max(0, countPlantableSeeds() - seedsBeforeForage);
+    }
+
+    if (emptyFarmland.length > 0 && countPlantableSeeds() > 0 && typeof this.bot.placeBlock === 'function') {
+      for (const fp of emptyFarmland) {
+        if (signal?.aborted) throw new Error('Đã hủy');
+        while (this.isPaused?.()) {
+          if (signal?.aborted) throw new Error('Đã hủy');
+          await sleep(200);
+        }
+        const soil = this.bot.blockAt?.(fp);
+        const abovePos = fp.offset ? fp.offset(0, 1, 0) : new Vec3(fp.x, fp.y + 1, fp.z);
+        const above = this.bot.blockAt?.(abovePos);
+        if (!soil || soil.name !== 'farmland' || (above && !isAirBlock(above))) continue;
+
+        const seedItem = (this.bot.inventory?.items?.() ?? []).find((i) => PLANTABLE_ITEMS.includes(i?.name));
+        if (!seedItem) break;
+        if (this.bot.entity?.position && this.bot.entity.position.distanceTo(fp) > 3.5) {
+          await this._gotoSafe(new goals.GoalNear(fp.x, fp.y, fp.z, 2), signal);
+        }
+        try {
+          await this.bot.equip(seedItem, 'hand');
+          await this.bot.placeBlock(soil, new Vec3(0, 1, 0));
+          replanted++;
+        } catch {}
+      }
+    }
+
+    if (foragedSeeds > 0) {
+      this.log(`🌾 Thu hoạch ${harvested}, kiếm thêm ${foragedSeeds} hạt, gieo lại ${replanted}`);
+      return { harvested, replanted, foragedSeeds };
+    }
     this.log(`🌾 Thu hoạch ${harvested}, gieo lại ${replanted}`);
     return { harvested, replanted };
   }
