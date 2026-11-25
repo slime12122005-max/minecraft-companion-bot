@@ -188,6 +188,55 @@ async function equipForExcavation(ctx, block, reqTier, signal) {
   }
 }
 
+export async function placeMiningTorchIfDark(ctx, feetPos, stepIdx, signal) {
+  const bot = ctx?.bot;
+  if (!bot || !feetPos || typeof bot.placeBlock !== 'function') return false;
+
+  let needsTorch = stepIdx > 0 && stepIdx % 5 === 0;
+  if (typeof bot.world?.getBlockLight === 'function') {
+    const blockLight = bot.world.getBlockLight(feetPos);
+    const skyLight = typeof bot.world?.getSkyLight === 'function' ? bot.world.getSkyLight(feetPos) : 0;
+    const tod = bot.time?.timeOfDay;
+    const isNight = bot.time?.isDay === false || (typeof tod === 'number' && tod >= 12542 && tod <= 23459);
+    needsTorch = blockLight < 7 && (skyLight < 7 || isNight);
+  }
+  if (!needsTorch) return false;
+
+  const findTorch = () => (bot.inventory?.items?.() ?? []).find((i) => i?.name === 'torch') ?? null;
+  let torchItem = findTorch();
+  if (!torchItem && stepIdx >= 2 && ctx.crafting?.craftItem) {
+    const items = bot.inventory?.items?.() ?? [];
+    const hasFuel = items.some((i) => (i?.name === 'coal' || i?.name === 'charcoal') && (i.count ?? 1) >= 1);
+    const hasStick = items.some((i) => i?.name === 'stick' && (i.count ?? 1) >= 1);
+    if (hasFuel && hasStick) {
+      await ctx.crafting.craftItem('torch', 4, signal).catch(() => {});
+      torchItem = findTorch();
+    }
+  }
+  if (!torchItem) return false;
+
+  const feetBlk = bot.blockAt?.(feetPos);
+  const feetName = String(feetBlk?.name ?? '').toLowerCase();
+  if (feetBlk && feetBlk.type !== 0 && !AIR_NAMES.has(feetName)) return false;
+
+  const floorPos = new Vec3(feetPos.x, feetPos.y - 1, feetPos.z);
+  const floor = bot.blockAt?.(floorPos);
+  const floorName = String(floor?.name ?? '').toLowerCase();
+  if (!floor || floor.type === 0 || floor.boundingBox === 'empty' || floorName.includes('lava') || floorName.includes('water')) {
+    return false;
+  }
+
+  try {
+    if (typeof bot.equip === 'function') {
+      await bot.equip(torchItem, 'hand');
+    }
+    await bot.placeBlock(floor, new Vec3(0, 1, 0));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function excavateStaircaseForStone(ctx, {
   ids,
   candidates,
@@ -203,21 +252,10 @@ async function excavateStaircaseForStone(ctx, {
   if (!startPos || typeof bot?.blockAt !== 'function' || needed <= 0) return 0;
 
   const homePos = ctx.home?.get?.() ?? null;
+  const ownerPos = ctx.config?.owner ? bot.players?.[ctx.config.owner]?.entity?.position ?? null : null;
   const startX = Math.floor(startPos.x);
   const startY = Math.floor(startPos.y);
   const startZ = Math.floor(startPos.z);
-
-  const cardinals = [
-    { x: 1, z: 0 },
-    { x: -1, z: 0 },
-    { x: 0, z: 1 },
-    { x: 0, z: -1 },
-  ].sort((a, b) => {
-    if (!homePos) return 0;
-    const da = Math.hypot((startX + a.x) - homePos.x, (startZ + a.z) - homePos.z);
-    const db = Math.hypot((startX + b.x) - homePos.x, (startZ + b.z) - homePos.z);
-    return db - da;
-  });
 
   const isColumnSafe = (px, minY, maxY, pz) => {
     const floor = bot.blockAt(new Vec3(px, minY - 1, pz));
@@ -241,16 +279,57 @@ async function excavateStaircaseForStone(ctx, {
     return true;
   };
 
+  const scoreDirection = (dir) => {
+    const entryDistOwner = ownerPos
+      ? Math.hypot((startX + dir.x + 0.5) - ownerPos.x, (startZ + dir.z + 0.5) - ownerPos.z)
+      : 10;
+    let walkableDepth = 0;
+    for (let s = 1; s <= 5; s++) {
+      const sx = startX + dir.x * s;
+      const sy = startY - s;
+      const sz = startZ + dir.z * s;
+      if (!isColumnSafe(sx, sy, sy + 2, sz)) break;
+      walkableDepth += 1;
+    }
+    const homeDist = homePos
+      ? Math.hypot((startX + dir.x) - homePos.x, (startZ + dir.z) - homePos.z)
+      : 0;
+    return {
+      dir,
+      nearOwnerPenalty: ownerPos && entryDistOwner < 2.2 ? 1 : 0,
+      walkableDepth,
+      distScore: entryDistOwner + homeDist,
+    };
+  };
+
+  const cardinals = [
+    { x: 1, z: 0 },
+    { x: -1, z: 0 },
+    { x: 0, z: 1 },
+    { x: 0, z: -1 },
+  ]
+    .map(scoreDirection)
+    .sort((a, b) => (a.nearOwnerPenalty - b.nearOwnerPenalty) || (b.walkableDepth - a.walkableDepth) || (b.distScore - a.distScore));
+
   let chosenDir = null;
-  for (const dir of cardinals) {
-    if (isColumnSafe(startX + dir.x, startY - 1, startY + 1, startZ + dir.z)) {
-      chosenDir = dir;
+  for (const cand of cardinals) {
+    if (isColumnSafe(startX + cand.dir.x, startY - 1, startY + 2, startZ + cand.dir.z)) {
+      chosenDir = cand.dir;
       break;
+    }
+  }
+  if (!chosenDir) {
+    for (const cand of cardinals) {
+      if (isColumnSafe(startX + cand.dir.x, startY - 1, startY + 1, startZ + cand.dir.z)) {
+        chosenDir = cand.dir;
+        break;
+      }
     }
   }
   if (!chosenDir) return 0;
 
   let cur = { x: startX, y: startY, z: startZ };
+  const stairSteps = [{ x: startX, y: startY, z: startZ }];
   let dugTargets = 0;
 
   const digCellIfSolid = async (p) => {
@@ -312,10 +391,12 @@ async function excavateStaircaseForStone(ctx, {
       } else {
         cur = { x: tx, y: ty, z: tz };
       }
+      stairSteps.push({ ...cur });
       return true;
     }
     cur = { x: tx, y: ty, z: tz };
     if (bot.entity) bot.entity.position = new Vec3(tx + 0.5, ty, tz + 0.5);
+    stairSteps.push({ ...cur });
     return true;
   };
 
@@ -338,15 +419,18 @@ async function excavateStaircaseForStone(ctx, {
     }
   };
 
-  // Phase 1: Safe 3-high staircase descent through overburden until stone/ore layer is reached
+  // Phase 1: Walkable 4-high staircase descent (ample jump headroom) with priority torch lighting
   let inTargetLayer = false;
   for (let step = 0; step < 11 && dugTargets < needed; step++) {
     const nx = cur.x + chosenDir.x;
     const ny = cur.y - 1;
     const nz = cur.z + chosenDir.z;
-    if (!isColumnSafe(nx, ny, cur.y + 1, nz)) break;
+    const clearTopY = isColumnSafe(nx, ny, cur.y + 2, nz)
+      ? cur.y + 2
+      : (isColumnSafe(nx, ny, cur.y + 1, nz) ? cur.y + 1 : null);
+    if (clearTopY == null) break;
 
-    for (let yy = cur.y + 1; yy >= ny; yy--) {
+    for (let yy = clearTopY; yy >= ny; yy--) {
       if (dugTargets >= needed) break;
       const ok = await digCellIfSolid(new Vec3(nx, yy, nz));
       if (!ok) return dugTargets;
@@ -356,6 +440,7 @@ async function excavateStaircaseForStone(ctx, {
     const moved = await stepTo(nx, ny, nz);
     if (!moved) break;
 
+    await placeMiningTorchIfDark(ctx, new Vec3(cur.x, cur.y, cur.z), stairSteps.length - 1, signal);
     await harvestNearbyReachableTargets();
     const frontHeadBlk = bot.blockAt(new Vec3(cur.x + chosenDir.x, cur.y + 1, cur.z + chosenDir.z));
     if (dugTargets > 0 && frontHeadBlk && ids.includes(frontHeadBlk.type)) {
@@ -365,7 +450,7 @@ async function excavateStaircaseForStone(ctx, {
   }
   if (dugTargets > 0) inTargetLayer = true;
 
-  // Phase 2: Short 2-high horizontal quarry along the stone layer until requested count is gathered
+  // Phase 2: Short 2-high horizontal quarry along the stone layer with torch lighting
   for (let h = 0; h < 12 && inTargetLayer && dugTargets < needed; h++) {
     await harvestNearbyReachableTargets();
     if (dugTargets >= needed) break;
@@ -383,11 +468,24 @@ async function excavateStaircaseForStone(ctx, {
     if (dugTargets >= needed) break;
     const moved = await stepTo(nx, ny, nz);
     if (!moved) break;
+
+    await placeMiningTorchIfDark(ctx, new Vec3(cur.x, cur.y, cur.z), stairSteps.length - 1, signal);
   }
 
   if (dugTargets > 0 && ctx._collectNearbyItemDrops) {
     await ctx._collectNearbyItemDrops(new Vec3(cur.x + 0.5, cur.y, cur.z + 0.5), signal, isPaused);
   }
+
+  // Walk cleanly back up the staircase entrance in live play so bot returns onto walkable surface
+  if (stairSteps.length > 1 && typeof bot.pathfinder?.goto === 'function' && bot._client) {
+    await ctx._gotoWithTimeout(new goals.GoalNear(startX + 0.5, startY, startZ + 0.5, 1.5), {
+      timeoutMs: Math.min(8000, ctx._timeouts.gotoMs),
+      stuckMs: Math.min(3000, ctx._timeouts.stuckMs),
+      signal,
+      isPaused,
+    }).catch(() => {});
+  }
+
   return dugTargets;
 }
 
@@ -527,6 +625,20 @@ export async function gather(ctx, targetText, count = 16, signal = null, { isPau
     for (const p of positions) {
       if (hasExposedAirFace(ctx.bot, p)) exposedPositions.push(p);
       else buriedPositions.push(p);
+    }
+    if (exposedPositions.length > 1 && ctx.bot.entity?.position) {
+      const bp = ctx.bot.entity.position;
+      const botFootY = Math.floor(bp.y);
+      exposedPositions.sort((a, b) => {
+        const dyA = a.y - botFootY;
+        const dyB = b.y - botFootY;
+        const walkPenA = (dyA >= -1 && dyA <= 2) ? 0 : Math.abs(dyA) * 4;
+        const walkPenB = (dyB >= -1 && dyB <= 2) ? 0 : Math.abs(dyB) * 4;
+        if (walkPenA !== walkPenB) return walkPenA - walkPenB;
+        const dA = Math.hypot(a.x + 0.5 - bp.x, a.y - bp.y, a.z + 0.5 - bp.z);
+        const dB = Math.hypot(b.x + 0.5 - bp.x, b.y - bp.y, b.z + 0.5 - bp.z);
+        return dA - dB;
+      });
     }
 
     let madeProgress = false;

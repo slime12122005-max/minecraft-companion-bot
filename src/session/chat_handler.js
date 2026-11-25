@@ -140,12 +140,14 @@ export function createChatHandler(ctx) {
       if (remaining) send(remaining);
     };
 
+    const activeRouter = ctx.router ?? router;
+
     if (username !== config.owner) {
       const now = Date.now();
       const last = nonOwnerRepliedAt.get(username) ?? 0;
       if (viaWhisper || now - last > 60000) {
         nonOwnerRepliedAt.set(username, now);
-        const guestType = router.parse?.(message)?.type ?? 'unknown';
+        const guestType = activeRouter.parse?.(message)?.type ?? 'unknown';
         const nonOwnerMsg = ctx.companion?.buildNonOwnerReply?.(username, message, guestType)
           ?? `Xin chào ${username}, tôi chỉ nghe lệnh của ${config.owner}.`;
         reply(nonOwnerMsg);
@@ -157,9 +159,9 @@ export function createChatHandler(ctx) {
       state.pendingQuantity = null;
     }
 
-    const routed = router.route
-      ? router.route(message)
-      : { command: router.parseChain ? router.parseChain(message) : router.parse(message), confidence: 1, tier: 'exact' };
+    const routed = activeRouter.route
+      ? activeRouter.route(message)
+      : { command: activeRouter.parseChain ? activeRouter.parseChain(message) : activeRouter.parse(message), confidence: 1, tier: 'exact' };
     let parsed = routed?.command;
     if (!parsed) return;
     if (routed?.tier === 'fuzzy') {

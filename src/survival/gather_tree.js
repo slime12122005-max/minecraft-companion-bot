@@ -599,6 +599,20 @@ async function digInPlaceTreeLog(ctx, block, pillarKeys, signal, isPaused) {
   }
 }
 
+function getPillarPingMs(ctx) {
+  const raw = Number(ctx?.bot?.player?.ping ?? ctx?.bot?.players?.[ctx?.bot?.username]?.ping ?? 0);
+  const host = String(ctx?.config?.minecraft?.host ?? '').trim().toLowerCase();
+  const isRemote = Boolean(
+    host &&
+    host !== 'localhost' &&
+    host !== '127.0.0.1' &&
+    host !== '::1' &&
+    !host.startsWith('192.168.') &&
+    !host.startsWith('10.')
+  );
+  return Math.max(0, Number.isFinite(raw) && raw > 0 ? raw : (isRemote ? 110 : 0));
+}
+
 async function pillarUpOneBlock(ctx, px, pz, seedBlock, pillarKeys, pillarStack, signal, isPaused) {
   const bot = ctx.bot;
   const eyeHeight = bot.entity.eyeHeight ?? 1.62;
@@ -677,19 +691,27 @@ async function pillarUpOneBlock(ctx, px, pz, seedBlock, pillarKeys, pillarStack,
     ).catch(() => {});
   }
 
+  const pingMs = getPillarPingMs(ctx);
+  const jumpMs = pingMs >= 60
+    ? Math.max(ctx._timeouts.pillarJumpMs ?? 450, Math.min(750, 450 + pingMs))
+    : (ctx._timeouts.pillarJumpMs ?? 450);
+  const settleMs = pingMs >= 60
+    ? Math.max(ctx._timeouts.pillarSettleMs ?? 80, Math.min(400, Math.round(pingMs * 1.6)))
+    : (ctx._timeouts.pillarSettleMs ?? 80);
+
   const targetPos = new Vec3(px, curY, pz);
   for (let attempt = 0; attempt < 2; attempt++) {
     await waitIfPaused(signal, isPaused);
     try {
       bot.setControlState?.('jump', true);
       if (bot._client) {
-        const deadline = Date.now() + (ctx._timeouts.pillarJumpMs ?? 450);
+        const deadline = Date.now() + jumpMs;
         while (Date.now() < deadline && bot.entity.position.y < curY + 1.0) {
           if (signal?.aborted) throw new Error('Đã hủy');
           await sleep(20);
         }
-      } else if ((ctx._timeouts.pillarJumpMs ?? 450) > 0) {
-        await sleep(Math.min(25, ctx._timeouts.pillarJumpMs));
+      } else if (jumpMs > 0) {
+        await sleep(Math.min(25, jumpMs));
       }
 
       if (bot.entity.position.y >= curY + 1.0 || !bot._client) {
@@ -705,13 +727,17 @@ async function pillarUpOneBlock(ctx, px, pz, seedBlock, pillarKeys, pillarStack,
       try { bot.setControlState?.('jump', false); } catch {}
     }
 
-    if (ctx._timeouts.pillarSettleMs > 0) {
-      await sleep(ctx._timeouts.pillarSettleMs);
+    if (settleMs > 0) {
+      await sleep(settleMs);
       if (signal?.aborted) throw new Error('Đã hủy');
     }
 
     const placed = bot.blockAt(targetPos);
     if (placed && placed.type !== 0) {
+      if (bot._client && bot.entity.position.y < curY + 0.8) {
+        await sleep(Math.min(200, Math.max(80, pingMs)));
+        continue;
+      }
       if (!bot._client && bot.entity.position.y < curY + 1) {
         setBotYMockSafe(bot, curY + 1);
       }
@@ -831,12 +857,15 @@ async function chopElevatedLogsWithPillar(
     }
   }
 
+  const pillarPingMs = getPillarPingMs(ctx);
+  const centerTol = pillarPingMs >= 60 ? 0.32 : 0.7;
+  const centerGoalRange = pillarPingMs >= 60 ? 0.25 : 0.35;
   if (
-    Math.hypot(ctx.bot.entity.position.x - (px + 0.5), ctx.bot.entity.position.z - (pz + 0.5)) > 0.7 ||
+    Math.hypot(ctx.bot.entity.position.x - (px + 0.5), ctx.bot.entity.position.z - (pz + 0.5)) > centerTol ||
     Math.abs(ctx.bot.entity.position.y - groundY) > 0.6
   ) {
     try {
-      await ctx._gotoWithTimeout(new goals.GoalNear(px + 0.5, groundY, pz + 0.5, 0.35), { signal, isPaused });
+      await ctx._gotoWithTimeout(new goals.GoalNear(px + 0.5, groundY, pz + 0.5, centerGoalRange), { signal, isPaused });
     } catch (err) {
       if (signal?.aborted) throw new Error('Đã hủy');
       if ((err.name === 'GoalChanged' || err.name === 'PathStopped') && isPaused?.()) {

@@ -1,6 +1,13 @@
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { appendFile, mkdir } from 'node:fs/promises';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { getDurabilityRatio } from '../equipment.js';
 import { summarizeReadiness } from '../readiness.js';
 import { BUILTIN_MACROS } from '../skills/macro_runner.js';
+
+const execFileAsync = promisify(execFile);
 
 const NOTABLE_STATION_BLOCKS = new Set([
   'ancient_debris',
@@ -420,6 +427,12 @@ export function createDashboardBridge(ctx) {
     if (action === 'safe_disconnect') {
       ctx.stopCurrentTask('Safe disconnect', { clearQueue: true });
       combat.stop();
+      if (!combat.busy && bot.entity) {
+        await Promise.race([
+          home?.stashAllForSwitch?.({ maxDistance: 6 }),
+          new Promise((r) => setTimeout(r, 2000)),
+        ]).catch(() => {});
+      }
       await memory?.flush?.().catch(() => {});
       webLog('🔌 Ngắt kết nối an toàn từ Dashboard.');
       bot.quit?.('Safe disconnect');
@@ -688,6 +701,59 @@ export function createDashboardBridge(ctx) {
 
   const devBugCooldown = new Map();
   let pendingDevTaskCount = 0;
+  let lastQueuedDevMeta = null;
+
+  async function hotReloadLocalCommandModules() {
+    try {
+      const cmdUrl = new URL('../commands.js', import.meta.url);
+      const basicUrl = new URL('./command_handlers_basic.js', import.meta.url);
+      const complexUrl = new URL('./command_handlers_complex.js', import.meta.url);
+      await Promise.all([
+        execFileAsync(process.execPath, ['--check', cmdUrl.pathname.replace(/^\/([A-Za-z]:)/, '$1')], { timeout: 5000, windowsHide: true }),
+        execFileAsync(process.execPath, ['--check', basicUrl.pathname.replace(/^\/([A-Za-z]:)/, '$1')], { timeout: 5000, windowsHide: true }),
+        execFileAsync(process.execPath, ['--check', complexUrl.pathname.replace(/^\/([A-Za-z]:)/, '$1')], { timeout: 5000, windowsHide: true }),
+      ]);
+      const ts = Date.now();
+      const [modCmd, modBasic, modComplex] = await Promise.all([
+        import(`${cmdUrl.href}?reload=${ts}`),
+        import(`${basicUrl.href}?reload=${ts}`),
+        import(`${complexUrl.href}?reload=${ts}`),
+      ]);
+      if (typeof modCmd?.CommandRouter === 'function') {
+        ctx.router = new modCmd.CommandRouter();
+      }
+      if (typeof modBasic?.handleBasicCommand === 'function') {
+        ctx.handleBasicCommandFn = modBasic.handleBasicCommand;
+      }
+      if (typeof modComplex?.handleComplexCommand === 'function') {
+        ctx.handleComplexCommandFn = modComplex.handleComplexCommand;
+      }
+      logFor?.('antigravity')?.('♻️ Đã nạp nóng lệnh/handler JS mới vào bot đang chạy (0 downtime).');
+      return { reloaded: true, modules: ['commands.js', 'command_handlers_basic.js', 'command_handlers_complex.js'] };
+    } catch (err) {
+      logFor?.('antigravity')?.(`⚠️ Không nạp nóng được module mới (giữ nguyên bản đang chạy): ${err.message}`);
+      return { reloaded: false, error: err.message };
+    }
+  }
+
+  async function appendAutoDevAuditLog({ devStatus, summary, meta, hotReloadResult } = {}) {
+    try {
+      const logPath = ctx.autoDevLogPath || 'data/auto_dev.log';
+      let changedFiles = [];
+      try {
+        const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { timeout: 2500, windowsHide: true });
+        changedFiles = String(stdout ?? '')
+          .split(/\r?\n/)
+          .map((l) => l.trim().slice(2).trim())
+          .filter((f) => /^(?:src|scripts|test)\//.test(f))
+          .slice(0, 12);
+      } catch {}
+      await mkdir(path.dirname(logPath), { recursive: true });
+      const cleanOneLine = (v) => String(v ?? '').replace(/[\r\n"]+/g, ' ').trim();
+      const entry = `[${new Date().toISOString()}] [${String(devStatus || 'passed').toUpperCase()}] kind=${meta?.devKind ?? 'unknown'} | title="${cleanOneLine(meta?.title)}" | phrase="${cleanOneLine(meta?.userPhrase)}" | summary="${cleanOneLine(summary)}" | hotReload=${Boolean(hotReloadResult?.reloaded)} | files=[${changedFiles.join(', ')}]\n`;
+      await appendFile(logPath, entry, 'utf8');
+    } catch {}
+  }
 
   async function onOpenDevTab({
     action = 'open',
@@ -704,6 +770,15 @@ export function createDashboardBridge(ctx) {
       const devStatus = status === 'failed' ? 'failed' : 'passed';
       const cleanSummary = String(summary ?? 'done').trim().slice(0, 600);
       const shouldSelfDelete = devStatus === 'passed' && pendingDevTaskCount === 0;
+      const hotReloadResult = devStatus === 'passed'
+        ? await hotReloadLocalCommandModules()
+        : { reloaded: false };
+      await appendAutoDevAuditLog({
+        devStatus,
+        summary: cleanSummary,
+        meta: lastQueuedDevMeta,
+        hotReloadResult,
+      });
       ctx.pushInbox?.({
         kind: 'dev_task_done',
         role: 'SYSTEM',
@@ -711,6 +786,7 @@ export function createDashboardBridge(ctx) {
         devStatus,
         remainingTasks: pendingDevTaskCount,
         summary: cleanSummary,
+        hotReloaded: Boolean(hotReloadResult?.reloaded),
         message: `[Auto-Dev complete: ${devStatus}] ${cleanSummary}`.trim(),
       });
       logFor?.('antigravity')?.(
@@ -722,6 +798,7 @@ export function createDashboardBridge(ctx) {
         status: devStatus,
         remainingTasks: pendingDevTaskCount,
         shouldSelfDelete,
+        hotReloaded: Boolean(hotReloadResult?.reloaded),
       };
     }
 
@@ -747,6 +824,13 @@ export function createDashboardBridge(ctx) {
     }
     devBugCooldown.set(signature, now);
     pendingDevTaskCount += 1;
+    lastQueuedDevMeta = {
+      devKind: cleanKind,
+      title: cleanTitle,
+      userPhrase: cleanPhrase,
+      summary: cleanSummary,
+      at: now,
+    };
 
     ctx.pushInbox?.({
       kind: 'dev_task',
@@ -801,6 +885,13 @@ export function createDashboardBridge(ctx) {
     if (now - prevAt < 900000) return false;
     devBugCooldown.set(signature, now);
     pendingDevTaskCount += 1;
+    lastQueuedDevMeta = {
+      devKind: 'fix_bug',
+      title: `Sửa lỗi runtime ở ${source}: ${errName || 'Error'}`,
+      userPhrase: context || null,
+      summary: errMsg,
+      at: now,
+    };
 
     const stackSnippet = String(error?.stack ?? '').split(/\r?\n/).slice(0, 5).join(' | ');
     ctx.pushInbox?.({

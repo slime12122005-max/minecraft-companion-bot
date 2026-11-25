@@ -126,8 +126,8 @@ export function createCommandDispatcher(ctx) {
     }
 
     const args = { username, reply, parentSignal, chatCtx, say, errorReply };
-    if (await handleBasicCommand(ctx, parsed, args)) return;
-    if (await handleComplexCommand(ctx, parsed, args)) return;
+    if (await (ctx.handleBasicCommandFn ?? handleBasicCommand)(ctx, parsed, args)) return;
+    if (await (ctx.handleComplexCommandFn ?? handleComplexCommand)(ctx, parsed, args)) return;
 
     switch (parsed.type) {
       case 'craft': {

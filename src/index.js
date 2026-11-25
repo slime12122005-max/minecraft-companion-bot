@@ -338,6 +338,7 @@ async function main() {
   }
 
   async function handleReconnectRequest({ host, port, owner, version, auth, worldName } = {}) {
+    const prevAuth = config.minecraft.auth === 'microsoft' ? 'microsoft' : 'offline';
     let parsedHostAddr = null;
     if (host) {
       parsedHostAddr = parseServerAddress(host, { defaultPort: port != null ? Number(port) : 25565 });
@@ -368,6 +369,27 @@ async function main() {
     if (auth === 'offline' || auth === 'microsoft') {
       config.minecraft.auth = auth;
     }
+
+    // If user typed an e4mc domain for a local LAN world running on the same machine, route via localhost
+    // so the bot keeps the exact same offline UUID/inventory and 0ms ping.
+    if (parsedHostAddr?.isE4mc && auth !== 'microsoft' && lanDiscovery) {
+      const targetOwner = String(config.owner || '').toLowerCase();
+      const localMatch = lanDiscovery.listActive().find(
+        (w) => isLocalHostAddress(w.host) && (!w.ownerHint || w.ownerHint.toLowerCase() === targetOwner)
+      );
+      if (localMatch && await probeTcpPort('127.0.0.1', localMatch.port, 400)) {
+        config.minecraft.host = '127.0.0.1';
+        config.minecraft.port = localMatch.port;
+        config.minecraft.auth = prevAuth;
+        logger.write(
+          'INFO',
+          'bot',
+          `💡 Domain e4mc này chính là thế giới LAN đang mở trên máy bạn (127.0.0.1:${localMatch.port}) -> nối trực tiếp nội bộ để giữ nguyên túi đồ (UUID) và ping 0ms!`
+        );
+      }
+    }
+
+    const nextAuth = config.minecraft.auth === 'microsoft' ? 'microsoft' : 'offline';
     waitingForLan = false;
     try { persistLanConfig(config); } catch (err) {
       logger.warn('config', `Không lưu được config.json: ${err.message}`);
@@ -385,6 +407,12 @@ async function main() {
     const oldSession = activeSession;
     activeSession = null;
     if (oldSession) {
+      if (!oldSession.combat?.busy && oldSession.bot?.entity && (nextAuth !== prevAuth || parsedHostAddr?.isE4mc)) {
+        await Promise.race([
+          oldSession.home?.stashAllForSwitch?.({ maxDistance: 8 }),
+          new Promise((r) => setTimeout(r, 2500)),
+        ]).catch(() => {});
+      }
       oldSession._manualRestart = true;
       await oldSession.cleanup().catch(() => {});
       try { oldSession.bot.quit?.(); } catch {}

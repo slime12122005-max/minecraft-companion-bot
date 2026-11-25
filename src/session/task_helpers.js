@@ -4,6 +4,7 @@ import { Vec3 } from 'vec3';
 import { resolveCandidateNames } from '../survival/index.js';
 import { foodSupply, requiredPickTier, PICK_ITEM_BY_TIER, PREP_HINT_BY_TIER } from '../readiness.js';
 import { TASK_TIERS } from '../tasks.js';
+import { isLocalHostAddress } from './lan_discovery.js';
 
 const CHEST_BLOCK_NAMES = new Set(['chest', 'trapped_chest', 'barrel']);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -18,13 +19,23 @@ export function formatError(err) {
   return err.code || String(err);
 }
 
-export function configureMovements(bot) {
+export function getEffectivePingMs(bot, config = null) {
+  const raw = Number(bot?.player?.ping ?? bot?.players?.[bot?.username]?.ping ?? 0);
+  const remoteHost = config?.minecraft?.host ? !isLocalHostAddress(config.minecraft.host) : false;
+  return Math.max(0, Number.isFinite(raw) && raw > 0 ? raw : (remoteHost ? 110 : 0));
+}
+
+export function configureMovements(bot, config = null) {
   const defaultMove = new Movements(bot);
+  const pingMs = getEffectivePingMs(bot, config);
   defaultMove.allowParkour = false;
   defaultMove.canOpenDoors = true;
   defaultMove.dontCreateFlow = true;
   defaultMove.dontMineUnderFallingBlock = true;
-  defaultMove.maxDropDown = 3;
+  defaultMove.maxDropDown = pingMs >= 80 ? 2 : 3;
+  if (pingMs >= 180) {
+    defaultMove.allowSprinting = false;
+  }
   defaultMove.liquidCost = 4;
   for (const blockName of ['magma_block', 'campfire', 'soul_campfire', 'sweet_berry_bush', 'cactus', 'wither_rose']) {
     const id = bot.registry?.blocksByName?.[blockName]?.id;

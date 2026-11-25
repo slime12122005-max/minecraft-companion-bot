@@ -78,7 +78,7 @@ export function bindSessionEvents(ctx) {
       retreating: combat.lastDecision?.action === 'retreat' && combat.busy,
       activeTask: Boolean(tasks.active && !tasks.paused),
     });
-    configureMovements(bot);
+    configureMovements(bot, config);
     const rawDeath = memory.get('lastDeath');
     if (rawDeath && !tasks.active) {
       if (rawDeath.dimension && bot.game?.dimension && String(rawDeath.dimension) !== String(bot.game.dimension)) {

@@ -839,6 +839,75 @@ export class HomeManager {
 
     return { stored: totalStored, byCategory };
   }
+
+  async stashAllForSwitch({ maxDistance = 8 } = {}) {
+    if (typeof this.bot?.openChest !== 'function' || !this.bot?.entity?.position) {
+      return { stored: 0 };
+    }
+    const items = [...(this.bot.inventory?.items?.() ?? [])];
+    const held = this.bot.heldItem ?? null;
+    if (held && !items.includes(held)) {
+      items.push(held);
+    }
+    if (items.length === 0) return { stored: 0 };
+
+    let chestBlock = null;
+    const saved = this.getStorageChest();
+    if (saved) {
+      const d = Math.hypot(
+        this.bot.entity.position.x - saved.x,
+        this.bot.entity.position.y - saved.y,
+        this.bot.entity.position.z - saved.z
+      );
+      if (d <= maxDistance) {
+        const cand = this.bot.blockAt?.(new Vec3(saved.x, saved.y, saved.z)) ?? null;
+        if (cand && CHEST_BLOCK_NAMES.has(cand.name)) chestBlock = cand;
+      }
+    }
+    if (!chestBlock && typeof this.bot.findBlock === 'function') {
+      chestBlock = this.bot.findBlock({
+        matching: (b) => b && CHEST_BLOCK_NAMES.has(b.name),
+        maxDistance: Math.min(6, maxDistance),
+      });
+    }
+    if (!chestBlock) return { stored: 0 };
+
+    if (
+      this.bot.pathfinder?.goto &&
+      chestBlock.position &&
+      this.bot.entity.position.distanceTo(chestBlock.position) > 4
+    ) {
+      await this.bot.pathfinder.goto(
+        new goals.GoalGetToBlock(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z)
+      );
+    }
+
+    let chestWindow = null;
+    let stored = 0;
+    try {
+      chestWindow = await this.bot.openChest(chestBlock);
+      for (const item of items) {
+        const cnt = Math.max(1, Number(item?.count ?? 1));
+        if (!item?.type) continue;
+        try {
+          await chestWindow.deposit(item.type, item.metadata ?? null, cnt);
+          stored += cnt;
+        } catch {}
+      }
+      if (chestBlock.position) {
+        this._indexChestWindow(chestBlock.position, chestWindow);
+      }
+    } finally {
+      if (typeof chestWindow?.close === 'function') {
+        try { chestWindow.close(); } catch {}
+      }
+    }
+
+    if (stored > 0) {
+      this.log(`📦 Đã cất tạm ${stored} vật phẩm vào rương trước khi chuyển kết nối/chế độ.`);
+    }
+    return { stored };
+  }
 }
 
 export default HomeManager;

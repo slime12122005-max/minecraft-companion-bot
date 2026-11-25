@@ -523,7 +523,7 @@ export async function handleBasicCommand(ctx, parsed, { username, reply, parentS
       const activeTask = tasks.status().active?.name ?? 'rảnh';
       const jevT = combat.lastJevTelemetry;
       const jevStr = jevT ? `, jev=${jevT.action}(${Math.round((jevT.confidence ?? 1) * 100)}%)` : '';
-      const combatStr = combat.config.enabled ? 'bật' : 'tắt';
+      const combatStr = combat?.config?.enabled !== false ? 'bật' : 'tắt';
       await say(`Máu ${Math.round(bot.health ?? 20)}/20, đói ${Math.round(bot.food ?? 20)}/20, đánh: ${combatStr}, việc: ${activeTask}${jevStr}, đồ: ${JSON.stringify(status.equipped)}`, { kind: 'final' });
       return true;
     }
